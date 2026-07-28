@@ -1,4 +1,4 @@
-# PKGNAME
+# wac_homekit
 
 TODO: one-line description.
 
@@ -17,8 +17,8 @@ already present).
 ## Usage
 
 ```sh
-uv run PKGNAME          # run via uv (works outside the devenv shell too)
-PKGNAME                 # run directly once the devenv shell is active
+uv run wac_homekit          # run via uv (works outside the devenv shell too)
+wac_homekit                 # run directly once the devenv shell is active
 ```
 
 ## Development

@@ -1,7 +1,7 @@
 [project]
-name = "PKGNAME"
+name = "wac_homekit"
 version = "0.1.0"
-description = "TODO: one-line description"
+description = "Apple HomeKit bridge to WAC lighting devices"
 authors = [
     { name = "Bruce Oberg", email = "bruce@oberg.org" }
 ]
@@ -9,18 +9,18 @@ requires-python = ">=3.13"
 dependencies = [
 ]
 
-# Entry point: `uv run PKGNAME` or just `PKGNAME` inside the devenv shell.
+# Entry point: `uv run wac_homekit` or just `wac_homekit` inside the devenv shell.
 # The CLI name (left of `=`) and the import path (right) both derive from
 # the package name; update both if you rename the project.
 [project.scripts]
-PKGNAME = "PKGNAME.main:main"
+wac_homekit = "wac_homekit.main:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/PKGNAME"]
+packages = ["src/wac_homekit"]
 
 [dependency-groups]
 dev = [
