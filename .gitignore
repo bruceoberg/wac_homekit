@@ -56,3 +56,6 @@ cover/
 
 # macOS
 .DS_Store
+
+# private
+private/
