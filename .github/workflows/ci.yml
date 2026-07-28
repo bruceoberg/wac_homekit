@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
 
     steps:
@@ -23,10 +23,15 @@ jobs:
         run: uv python install
 
       - name: Install dependencies
-        run: uv sync --all-extras
+        run: uv sync
 
-      - name: Run tests
-        run: uv run pytest
-
+      # Covers both workspace members — see [tool.mypy] files in pyproject.toml.
       - name: Type-check
-        run: uv run mypy src/
+        run: uv run mypy
+
+      # --all-packages so wac_iot is built too, not just the root project.
+      - name: Build
+        run: uv build --all-packages
+
+# NOTE(bruce) no pytest step: the suite covers pure functions and runs locally
+# via `just test`. Device-layer verification needs real hardware (`just dump`).

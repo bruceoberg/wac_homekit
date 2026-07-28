@@ -1,0 +1,19 @@
+[project]
+name = "wac_iot"
+version = "0.1.0"
+description = "Client library for WAC Lighting IoT devices"
+authors = [
+    { name = "Bruce Oberg", email = "bruce@oberg.org" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "aiohttp>=3.9",
+    "zeroconf>=0.132",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wac_iot"]

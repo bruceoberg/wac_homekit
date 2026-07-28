@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Entry point for `python -m PKGNAME`."""
+"""Entry point for `python -m wac_homekit`."""
 
-from PKGNAME.main import main
+from wac_homekit.main import main
 
 main()

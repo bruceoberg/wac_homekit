@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HomeKit bridge for WAC Lighting IoT devices."""
+"""Client library for WAC Lighting IoT devices."""
 
 from importlib.metadata import version, metadata
 from pathlib import Path
