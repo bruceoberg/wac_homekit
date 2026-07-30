@@ -61,33 +61,99 @@ Every page is marked CONFIDENTIAL. **Never copy its text into a committed
 file** — no pasting tables into docstrings, comments, README, or markdown.
 Derive code from it; do not reproduce it.
 
-It is also not fully reliable. Verify these against a real device rather than
-trusting the document:
+It is also not fully reliable. **Where the document and hardware disagree, the
+hardware wins** — the notes below record measurements, not readings.
 
-- The overview says the HTTP server port is 80; the mDNS section says the
-  advertised service port is 443, corresponding to HTTPS. Determine which
-  actually answers, and expect a self-signed certificate.
-- `result` is documented as a String and appears as `"0"` in the sample device
-  response. Parse both string and numeric forms.
-- Fixture type IDs skip 4, 5, and 7–10. Unknown types must log and be skipped,
-  never raise.
-- mDNS TXT keys contain literal spaces: `Firmware Ver`, `Protocol Ver`.
+### Measured against real hardware
+
+Measured on a ColorScaping controller (`iotmVer 01.04.0149`, `restVer 1.40`)
+and two InvisiLED wall stations (`iotmVer 01.00.0014`, `restVer 1.40`). The
+document describes protocol 1.91, so expect further drift on newer firmware —
+re-run `just dump` rather than assuming these hold.
+
+- **The interface is plain HTTP on port 80.** Port 443 refuses the connection
+  outright on every device tested, even though mDNS advertises it. There is no
+  TLS and no certificate to deal with. `wac_iot probe` re-checks this.
+- **`query` must be boolean `true`.** The document's example shows `"query": 1`;
+  that is rejected with an undocumented result code `-100` and a `status`
+  string explaining it. Status codes outside Appendix 2 exist — never assume
+  the appendix is exhaustive.
+- **mDNS instance names do not use the documented `STRUT_` prefix.** Observed:
+  `WAC_WCT_xxxxxx` (wall station) and `WAC_CS_xxxxxx` (ColorScaping). The
+  stable part is the trailing six hex digits of the station MAC; parse that,
+  do not match a prefix.
+- **Fixture type 4 exists**, despite the document skipping it. Its `detail` is
+  corrupt — model and driver strings arrive byte-reversed (`gnipacsroloC`),
+  with a nonsense date code and control characters in `pcbVer`. It has empty
+  `state` and `tune` and is excluded from the All-Default group, so it is
+  likely the controller appearing as a pseudo-fixture. Unknown types must log
+  and resolve, never raise.
+- `result` is documented as a String and observed as `"0"`. Parse both string
+  and numeric forms.
+- mDNS TXT keys do contain literal spaces, as documented: `Firmware Ver`,
+  `Protocol Ver`.
+- Every response carries an undocumented `staMac`.
+- Fixture addresses are large 32-bit values, not small indices, and a fixture's
+  default name embeds its own address in hex (`Zone 2 09FFFFFD` at
+  `167772157`).
+- **RGBW fixtures also report a color temperature range and step table** in
+  `detail` (`minColorTemp` / `maxColorTemp` / `colorTempStepsTable`), so RGBW
+  shares the tunable-white detail shape rather than the plain one. Within that
+  table the firmware names the value `colorStepsValue`, not the documented
+  `mixColorTemp`; both are accepted.
+- A transformer's own output zone appears as an ordinary **type 6 (ELV)**
+  fixture, which the document does describe as virtual. It is not a distinct
+  hub or controller type.
+
+### Still unverified
+
 - Tunable white accepts `colorTempLevel` (steps 1–7) *or* `mixColorTemp`
   (Kelvin), explicitly not both. RGBW exposes both RGB and HSV. Pick one path
   per fixture type and use it consistently.
+- No tunable white, fan, motorized trackhead, or wall-station *fixture* (type
+  11) has been seen on real hardware yet. Those models are written from the
+  document alone. Single color (0), RGBW (2), and ELV (6) have been seen.
+- Nothing has been *written* to a device yet — every observation so far is from
+  reads. Control (action 4) and configure (action 6) are unexercised.
 
 ## Protocol facts that shape the design
 
 - Every endpoint is a `POST` carrying an `action` number in the JSON body.
-  There is no verb-to-operation mapping; do not design one.
-- `POST /fixture` with `{"action": 3}` and `addr` omitted returns **every**
-  fixture with its `state`, `tune`, and `detail`. The poll loop is one request,
-  not one per fixture. `/group` action 3 behaves the same way.
+  There is no verb-to-operation mapping; do not design one. `/device` is the
+  exception: it carries no action and dispatches on which fields are present.
+- **The documented one-request bulk read does not work.** `POST /fixture` with
+  `{"action": 3}` and `addr` omitted is documented to return every fixture with
+  its `state`, `tune`, and `detail`. It does neither: it returns summaries only
+  (`addr`, `name`, `type`, `model`, `online`) *and* silently omits fixtures
+  that action 5 lists.
+
+  Poll with **action 5 for the addresses, then action 3 with the full address
+  array** — that returns complete structures and is still two requests total,
+  not one per fixture. `CFixtures.LFixtureReadAll` does exactly this; use it
+  rather than `ObjRead()`.
+- Not every device implements every endpoint. The wall stations answer only
+  `/device`, `/network`, `/ota`, and `/fs`, and return HTTP 404 with a plain
+  text body for `/fixture`, `/group`, and `/automation`. Tools must degrade
+  per-endpoint instead of aborting the run.
+- **Wall stations are not reachable as fixtures over REST.** Even fully
+  commissioned through the WAC app, an InvisiLED wall station exposes no
+  fixture, group, remote, or input endpoint — only its own identity. It does
+  not appear in the transformer's fixture list either, and the transformer's
+  `/remote` list is empty. Devices are associated only by a shared
+  `locationId`, and the transformer advertises a `wsMcast` feature, so button
+  presses almost certainly travel over the UDP multicast channel rather than
+  REST. **Do not plan on reading wall-station buttons through this
+  interface** — treat each device as its own independent REST endpoint,
+  grouped by `locationId`.
+- The transformer is the only device worth polling for light state. Address it
+  directly; do not try to reach its fixtures through a wall station.
 - There is no push channel. Polling is the only option; 5–10 seconds is the
   starting range for these ESP32-class devices.
 - `findme` in a fixture's control state maps onto HomeKit's Identify
   characteristic.
-- Group address 255 is a built-in "All-Default" group containing every fixture.
+- Group address 255 is a built-in "All-Default" group. It holds every *real*
+  fixture, but not the type-4 pseudo-fixture above — do not treat its
+  membership as equivalent to the action 5 address list.
 
 ## Testing
 

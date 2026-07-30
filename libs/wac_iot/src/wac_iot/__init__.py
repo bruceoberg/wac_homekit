@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Client library for WAC Lighting IoT devices."""
+"""Client library for WAC Lighting IoT devices.
+
+Everything below is the supported surface. Consumers import from here, not
+from submodules — this list is what a Home Assistant integration would build
+against, so treat additions as API decisions.
+
+Values are in device units throughout. Converting them to whatever a
+consumer's platform wants is that consumer's job, deliberately.
+"""
 
 from importlib.metadata import version, metadata
 from pathlib import Path
@@ -12,3 +20,107 @@ __author_email__ = metadata(__project__)["Author-email"]
 
 # Useful for locating data files bundled alongside the source.
 g_pathCode = Path(__file__).parent
+
+from .client import CClient, GROUP_ADDR_ALL
+from .discovery import (
+	SERVICE_TYPE,
+	CBrowser,
+	DiscoFromTxt,
+	LDiscoBrowse,
+	SDisco,
+	StrTryMacSuffix,
+)
+from .device import CDevice, SDeviceInfo, SNwkState
+from .errors import (
+	RESULT,
+	ErrFromResponse,
+	ResultFromAny,
+	WacDeviceError,
+	WacError,
+	WacResponseError,
+	WacTimeoutError,
+	WacTransportError,
+)
+from .fixture import CFixtures
+from .models import (
+	FIXTUREK,
+	LIGHTMODE,
+	CFixture,
+	SDetail,
+	SDetailMotor,
+	SDetailWhite,
+	SState,
+	SStateFan,
+	SStateLight,
+	SStateMotor,
+	SStateRgbw,
+	SStateWall,
+	SStateWhite,
+	STune,
+	STuneMotor,
+	STuneRgbw,
+	STuneWhite,
+)
+from .transport import PORT_HTTP, PORT_HTTPS, CTransport, ProbeHost, SPortProbe, SProbe
+
+__all__ = [
+	# Entry point for nearly everything.
+	"CClient",
+
+	# Endpoints, for a consumer that wants to compose its own transport.
+	"CTransport",
+	"CDevice",
+	"CFixtures",
+
+	# Discovery. DiscoFromTxt is pure and Zeroconf-free — a consumer with its
+	# own mDNS stack should call it directly and ignore CBrowser.
+	"DiscoFromTxt",
+	"StrTryMacSuffix",
+	"SDisco",
+	"CBrowser",
+	"LDiscoBrowse",
+	"SERVICE_TYPE",
+
+	# Errors. Catch WacError to catch everything this library raises.
+	"WacError",
+	"WacDeviceError",
+	"WacTransportError",
+	"WacTimeoutError",
+	"WacResponseError",
+	"RESULT",
+	"ErrFromResponse",
+	"ResultFromAny",
+
+	# Fixtures and the structures they carry.
+	"CFixture",
+	"FIXTUREK",
+	"LIGHTMODE",
+	"SState",
+	"SStateLight",
+	"SStateWhite",
+	"SStateRgbw",
+	"SStateMotor",
+	"SStateWall",
+	"SStateFan",
+	"STune",
+	"STuneWhite",
+	"STuneRgbw",
+	"STuneMotor",
+	"SDetail",
+	"SDetailWhite",
+	"SDetailMotor",
+
+	# Device information.
+	"SDeviceInfo",
+	"SNwkState",
+
+	# Probing, for working out what a given device actually serves.
+	"ProbeHost",
+	"SProbe",
+	"SPortProbe",
+	"PORT_HTTP",
+	"PORT_HTTPS",
+
+	# Constants worth naming.
+	"GROUP_ADDR_ALL",
+]

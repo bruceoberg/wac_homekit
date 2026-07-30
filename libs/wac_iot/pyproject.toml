@@ -8,8 +8,14 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.9",
+    "pydantic>=2.13.4",
     "zeroconf>=0.132",
 ]
+
+# Shipping a console script from a library is slightly impure, but debugging
+# the device layer without the bridge in the way is worth it.
+[project.scripts]
+wac_iot = "wac_iot.cli:main"
 
 [build-system]
 requires = ["hatchling"]
