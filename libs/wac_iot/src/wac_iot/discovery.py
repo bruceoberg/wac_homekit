@@ -15,13 +15,39 @@ from __future__ import annotations  # Forward refs without quotes
 import asyncio
 import logging
 
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from pydantic import Field
-from zeroconf import ServiceStateChange, Zeroconf
-from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
 from .models import SWac
+
+# Zeroconf backs `CBrowser` and nothing else, so it is an extra rather than a
+# hard dependency: `pip install wac_iot[discovery]`. A consumer with its own
+# mDNS stack — Home Assistant, which hands every integration a shared instance
+# — installs the bare package and calls `DiscoFromTxt` directly. Importing it
+# unconditionally would force a second Zeroconf into that process, so the
+# imports happen inside the `CBrowser` methods that need them.
+
+if TYPE_CHECKING:
+	from zeroconf import ServiceStateChange, Zeroconf
+	from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
+
+
+def FIsZeroconfAvailable() -> bool:
+	"""Whether the `discovery` extra is importable.
+
+	Attempts the import rather than looking for the module on disk: what
+	matters to `CBrowser` is whether the import will succeed, and a package
+	present but broken should answer no here instead of failing later with a
+	worse message.
+	"""
+
+	try:
+		import zeroconf  # noqa: F401
+	except ImportError:
+		return False
+
+	return True
 
 g_log = logging.getLogger(__name__)
 
@@ -193,11 +219,20 @@ class CBrowser:  # tag = browser
 	g_dTResolve = 3.0  # seconds to wait for a service's details
 
 	def __init__(self) -> None:
+		if not FIsZeroconfAvailable():
+			raise RuntimeError(
+				"CBrowser needs the zeroconf package: install wac_iot[discovery]. "
+				"To parse service info from an mDNS stack you already have, call "
+				"DiscoFromTxt instead."
+			)
+
 		self.azc: AsyncZeroconf | None = None
 		self.mpStrDisco: dict[str, SDisco] = {}
 		self.lTask: list[asyncio.Task[None]] = []
 
 	async def __aenter__(self) -> CBrowser:
+		from zeroconf.asyncio import AsyncZeroconf
+
 		self.azc = AsyncZeroconf()
 
 		return self
@@ -216,6 +251,8 @@ class CBrowser:  # tag = browser
 		Blocks for the full browse window; there is no way to know an
 		enumeration is complete on an unmanaged network.
 		"""
+
+		from zeroconf.asyncio import AsyncServiceBrowser
 
 		if self.azc is None:
 			raise RuntimeError("CBrowser must be used as an async context manager")
@@ -248,6 +285,8 @@ class CBrowser:  # tag = browser
 	) -> None:
 		"""Zeroconf callback. Runs on Zeroconf's thread, so it only schedules."""
 
+		from zeroconf import ServiceStateChange
+
 		if state_change is ServiceStateChange.Removed:
 			self.mpStrDisco.pop(name, None)
 
@@ -256,6 +295,8 @@ class CBrowser:  # tag = browser
 		self.lTask.append(asyncio.ensure_future(self._ResolveService(service_type, name)))
 
 	async def _ResolveService(self, strServiceType: str, strName: str) -> None:
+		from zeroconf.asyncio import AsyncServiceInfo
+
 		if self.azc is None:
 			return
 

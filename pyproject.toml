@@ -7,7 +7,7 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "wac-iot",
+    "wac-iot[discovery]",
 ]
 
 # Entry point: `uv run wac_homekit` or just `wac_homekit` inside the devenv shell.

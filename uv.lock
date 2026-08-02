@@ -681,7 +681,7 @@ name = "wac-homekit"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "wac-iot" },
+    { name = "wac-iot", extra = ["discovery"] },
 ]
 
 [package.dev-dependencies]
@@ -691,7 +691,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "wac-iot", editable = "libs/wac_iot" }]
+requires-dist = [{ name = "wac-iot", extras = ["discovery"], editable = "libs/wac_iot" }]
 
 [package.metadata.requires-dev]
 dev = [
@@ -706,6 +706,10 @@ source = { editable = "libs/wac_iot" }
 dependencies = [
     { name = "aiohttp" },
     { name = "pydantic" },
+]
+
+[package.optional-dependencies]
+discovery = [
     { name = "zeroconf" },
 ]
 
@@ -713,8 +717,9 @@ dependencies = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
     { name = "pydantic", specifier = ">=2.13.4" },
-    { name = "zeroconf", specifier = ">=0.132" },
+    { name = "zeroconf", marker = "extra == 'discovery'", specifier = ">=0.132" },
 ]
+provides-extras = ["discovery"]
 
 [[package]]
 name = "yarl"

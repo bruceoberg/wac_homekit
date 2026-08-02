@@ -63,6 +63,12 @@ class CTransport:  # tag = trans
 
 	Owns the base URL, TLS policy, timeout, and retry. Use as an async
 	context manager so the session is always closed.
+
+	A caller may hand in its own session instead of letting this build one.
+	Home Assistant requires that — every integration shares one session from
+	`async_get_clientsession` — and it is the right shape for the bridge too,
+	which holds several transports at once. An injected session is borrowed,
+	never closed.
 	"""
 
 	g_cRetryDefault = 2       # extra attempts after the first
@@ -77,6 +83,7 @@ class CTransport:  # tag = trans
 		dTTimeout: float = 10.0,
 		fVerifyTls: bool = False,
 		cRetry: int | None = None,
+		session: aiohttp.ClientSession | None = None,
 	) -> None:
 		self.strHost = strHost
 		self.fTls = fTls
@@ -88,7 +95,29 @@ class CTransport:  # tag = trans
 		strScheme = "https" if fTls else "http"
 		self.strBaseUrl = f"{strScheme}://{strHost}:{self.nPort}"
 
-		self.session: aiohttp.ClientSession | None = None
+		# Both of these used to live on the session — the base URL as
+		# `base_url`, the TLS policy as a `TCPConnector`. Neither can be set on
+		# a session someone else owns, so both moved to the request instead.
+		# ssl=False disables verification wholesale; a context is only needed
+		# when we actually intend to verify.
+
+		self.objSsl: ssl.SSLContext | bool
+		if not fTls:
+			self.objSsl = False
+		elif fVerifyTls:
+			self.objSsl = ssl.create_default_context()
+		else:
+			self.objSsl = SslctxNoVerify()
+
+		self.timeout = aiohttp.ClientTimeout(total=dTTimeout)
+
+		self.session = session
+		self._fCloseSession = False  # true only for a session we built ourselves
+
+	def StrUrl(self, strUri: str) -> str:
+		"""Absolute URL for an endpoint path."""
+
+		return f"{self.strBaseUrl}{strUri}"
 
 	async def __aenter__(self) -> CTransport:
 		await self.Open()
@@ -102,29 +131,19 @@ class CTransport:  # tag = trans
 		if self.session is not None:
 			return
 
-		# ssl=False disables verification wholesale; a context is only needed
-		# when we actually intend to verify.
-
-		objSsl: ssl.SSLContext | bool
-		if not self.fTls:
-			objSsl = False
-		elif self.fVerifyTls:
-			objSsl = ssl.create_default_context()
-		else:
-			objSsl = SslctxNoVerify()
-
-		self.session = aiohttp.ClientSession(
-			base_url=self.strBaseUrl,
-			timeout=aiohttp.ClientTimeout(total=self.dTTimeout),
-			connector=aiohttp.TCPConnector(ssl=objSsl),
-		)
+		self.session = aiohttp.ClientSession()
+		self._fCloseSession = True
 
 	async def Close(self) -> None:
-		if self.session is None:
+		"""Close the session, but only if we were the one that opened it."""
+
+		if self.session is None or not self._fCloseSession:
 			return
 
 		await self.session.close()
+
 		self.session = None
+		self._fCloseSession = False
 
 	async def ObjPost(self, strUri: str, obj: dict[str, Any]) -> dict[str, Any]:
 		"""POST a JSON body and return the decoded response object.
@@ -179,7 +198,12 @@ class CTransport:  # tag = trans
 				await asyncio.sleep(dTBackoff)
 
 			try:
-				async with self.session.post(strUri, json=obj) as response:
+				async with self.session.post(
+					self.StrUrl(strUri),
+					json=obj,
+					ssl=self.objSsl,
+					timeout=self.timeout,
+				) as response:
 					err = ErrFromStatus(response.status)
 					if err is not None:
 						raise err

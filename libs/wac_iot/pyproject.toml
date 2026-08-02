@@ -9,13 +9,21 @@ requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.9",
     "pydantic>=2.13.4",
-    "zeroconf>=0.132",
 ]
 
 # Shipping a console script from a library is slightly impure, but debugging
 # the device layer without the bridge in the way is worth it.
 [project.scripts]
 wac_iot = "wac_iot.cli:main"
+
+# Only CBrowser needs zeroconf. A consumer with its own mDNS stack — Home
+# Assistant hands every integration a shared instance — installs the bare
+# package and calls DiscoFromTxt, rather than dragging a second Zeroconf into
+# the process.
+[project.optional-dependencies]
+discovery = [
+    "zeroconf>=0.132",
+]
 
 [build-system]
 requires = ["hatchling"]

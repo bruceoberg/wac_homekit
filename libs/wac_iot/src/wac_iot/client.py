@@ -10,6 +10,8 @@ from __future__ import annotations  # Forward refs without quotes
 
 from typing import Any
 
+import aiohttp
+
 from .device import CDevice
 from .fixture import CFixtures
 from .transport import CTransport
@@ -38,6 +40,15 @@ class CClient:  # tag = client
 
 		async with CClient("10.0.0.8") as client:
 			devi = await client.device.DeviQuery()
+
+	A consumer that already owns an aiohttp session passes it in and keeps
+	responsibility for closing it:
+
+		client = CClient(strHost, session=session, cRetry=0)
+
+	That is the shape Home Assistant needs — one shared session per install,
+	and its coordinator does its own retrying, so `cRetry=0` avoids stacking
+	our backoff inside its poll interval.
 	"""
 
 	def __init__(
@@ -49,6 +60,7 @@ class CClient:  # tag = client
 		dTTimeout: float = 10.0,
 		fVerifyTls: bool = False,
 		cRetry: int | None = None,
+		session: aiohttp.ClientSession | None = None,
 	) -> None:
 		self.trans = CTransport(
 			strHost,
@@ -57,6 +69,7 @@ class CClient:  # tag = client
 			dTTimeout=dTTimeout,
 			fVerifyTls=fVerifyTls,
 			cRetry=cRetry,
+			session=session,
 		)
 
 		self.device = CDevice(self.trans)

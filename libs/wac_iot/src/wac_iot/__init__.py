@@ -26,6 +26,7 @@ from .discovery import (
 	SERVICE_TYPE,
 	CBrowser,
 	DiscoFromTxt,
+	FIsZeroconfAvailable,
 	LDiscoBrowse,
 	SDisco,
 	StrTryMacSuffix,
@@ -73,12 +74,14 @@ __all__ = [
 	"CFixtures",
 
 	# Discovery. DiscoFromTxt is pure and Zeroconf-free — a consumer with its
-	# own mDNS stack should call it directly and ignore CBrowser.
+	# own mDNS stack should call it directly and ignore CBrowser, which needs
+	# the `discovery` extra and says so if it is missing.
 	"DiscoFromTxt",
 	"StrTryMacSuffix",
 	"SDisco",
 	"CBrowser",
 	"LDiscoBrowse",
+	"FIsZeroconfAvailable",
 	"SERVICE_TYPE",
 
 	# Errors. Catch WacError to catch everything this library raises.
