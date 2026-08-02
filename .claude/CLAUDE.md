@@ -134,6 +134,41 @@ only writes ever made to this hardware.
   this lights a dedicated white LED or just all three colour channels is
   unknown — the `mixColorTemp` path has never been written.
 
+#### Where brightness lives — partly measured, partly open
+
+Setting "dark red" from the WAC app produced `red: 128` alongside `hue: 0`,
+`saturation: 10000`, `level: 9977`. Writing `red: 255` back moved nothing
+else. What that establishes on the wire:
+
+- **`level` and the RGB triple are independent fields.** Writing the RGB
+  triple alone left `level` at 9977 exactly. Neither is derived from the
+  other.
+- **HSV carries no value component.** Taking red from 128 to 255 left `hue`
+  at 0 and `saturation` at 10000, unmoved. Value is therefore in the RGB
+  magnitude and nowhere in H/S — so `hue` + `saturation` + `level` is *not*
+  a complete description of the colour state.
+- **`hue: 0` is ambiguous on its own.** Fully saturated red and fully
+  desaturated white both report it; only `saturation` separates them. Never
+  treat a falsy hue as "no colour reported".
+
+**Open: whether RGB magnitude actually changes light output.** Every
+brightness reading so far was taken in daylight, where neither the app's
+own "red" / "dark red" presets nor our 128 → 255 write produced a
+discernible difference. So `red: 128` may mean half output, or may be a
+stored value the fixture does not render. Until that is settled in darkness,
+do not build brightness conversion on either assumption.
+
+The two answers lead to different bridges. If magnitude does drive output,
+apparent brightness is a product of `level` and RGB magnitude, reading
+`level` alone would report 99.8% on a half-lit fixture, and writing
+brightness has two mechanisms that need to be chosen between. If it does
+not, `level` alone is the brightness field and the magnitude is cosmetic.
+Test in the dark: set `red: 255`, then `red: 64`, with `level` untouched.
+
+Colour *hue* readings are not in doubt — cyan, red and green were each set
+from the app and read back correctly, and a blue-to-white change was
+confirmed by eye. Only the brightness axis is unresolved.
+
 ### Still unverified
 
 - Tunable white accepts `colorTempLevel` (steps 1–7) *or* `mixColorTemp`
