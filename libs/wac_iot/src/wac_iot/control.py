@@ -14,10 +14,12 @@ mutually-exclusive groupings are ours.
 Values stay in device units. Converting from a platform's ranges is the
 consumer's job, deliberately — see the repo's CLAUDE.md.
 
-Nothing here has been exercised against real hardware; action 4 is still
-unwritten territory. The exclusions below are the conservative reading, and
-are meant to be relaxed once a device says otherwise rather than worked
-around at the call site.
+Partly exercised against real hardware: `status`, `findme` and the RGB
+triple have been written to an RGBW fixture, and the RGB-against-HSV
+exclusion below is measured rather than assumed. Everything else — level,
+hue, saturation, mixColorTemp, mode, and every fan and white field — is
+still the conservative reading, and is meant to be relaxed once a device
+says otherwise rather than worked around at the call site.
 """
 
 from __future__ import annotations  # Forward refs without quotes
@@ -39,6 +41,14 @@ HUE_MAX = 10000
 
 SATURATION_MIN = 0
 SATURATION_MAX = 10000
+
+# The one field that is not 0–10000, which is exactly why it is worth
+# checking: a consumer reasoning by analogy with hue would send 10000 and get
+# something unintended. Measured — a fixture at full blue reports blue 255,
+# and writing 255 to all three produced white.
+
+RGB_MIN = 0
+RGB_MAX = 255
 
 COLOR_TEMP_LEVEL_MIN = 1    # stepped white index
 COLOR_TEMP_LEVEL_MAX = 7
@@ -159,13 +169,10 @@ def ObjStateRgbw(
 	"""Control state for an RGBW fixture (2).
 
 	Color can be addressed three ways — HSV, RGB, or a white point — and
-	they describe different modes of the same output. Sending more than one
-	in a request leaves it to the firmware to decide which wins, so this
-	refuses instead.
-
-	RGB components are passed through unchecked: their range is not
-	something hardware has confirmed, and inventing a bound would be worse
-	than none. Hue and saturation are checked; those are known.
+	they are views of one underlying state rather than independent fields.
+	Measured: writing the RGB triple also moved hue and saturation, which the
+	request never mentioned. So sending two of them is two conflicting writes
+	to the same thing, and this refuses instead of letting the firmware pick.
 	"""
 
 	cColorWay = sum(
@@ -190,7 +197,9 @@ def ObjStateRgbw(
 		obj["saturation"] = nSaturation
 
 	if tplRgb is not None:
-		obj["red"], obj["green"], obj["blue"] = tplRgb
+		for strField, nComponent in zip(("red", "green", "blue"), tplRgb):
+			_CheckRange(strField, nComponent, RGB_MIN, RGB_MAX)
+			obj[strField] = nComponent
 
 	if nColorTemp is not None:
 		obj["mixColorTemp"] = nColorTemp

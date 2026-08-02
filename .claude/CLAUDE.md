@@ -112,19 +112,39 @@ re-run `just dump` rather than assuming these hold.
   fixture, which the document does describe as virtual. It is not a distinct
   hub or controller type.
 
+#### Writing state (action 4)
+
+Measured on an RGBW fixture on the ColorScaping transformer. These are the
+only writes ever made to this hardware.
+
+- **Control works and partial writes are partial.** `status` alone, then
+  `red`/`green`/`blue` alone, each accepted with `result "0"`. Fields not
+  named in the body stayed exactly where they were — `level` held at 9981
+  and `mode` at 2 across both writes. Send only what is changing.
+- **RGB components are 0–255**, not the 0–10000 everything else uses. 255
+  was accepted and stored verbatim, and the fixture's own full-blue state
+  reports `blue: 255`.
+- **RGB and HSV are two views of one colour state, not independent
+  fields.** Writing `red`/`green`/`blue` = 255 also moved `hue` 6666 → 0 and
+  `saturation` 10000 → 0, which nothing in the request mentioned. So the
+  firmware derives one from the other, and sending both in a single request
+  really would be two conflicting writes. `ObjStateRgbw` refuses that.
+- **RGB (255,255,255) produces visible white** on an RGBW fixture, confirmed
+  by eye. The firmware agrees, reporting `saturation: 0` afterwards. Whether
+  this lights a dedicated white LED or just all three colour channels is
+  unknown — the `mixColorTemp` path has never been written.
+
 ### Still unverified
 
 - Tunable white accepts `colorTempLevel` (steps 1–7) *or* `mixColorTemp`
-  (Kelvin), explicitly not both. RGBW exposes both RGB and HSV. Pick one path
-  per fixture type and use it consistently.
+  (Kelvin), explicitly not both — document only, and no tunable white fixture
+  has been seen. The comparable RGBW rule *is* now measured; see above.
 - No tunable white, fan, motorized trackhead, or wall-station *fixture* (type
   11) has been seen on real hardware yet. Those models are written from the
   document alone. Single color (0), RGBW (2), and ELV (6) have been seen.
-- Configure (action 6) is still unexercised. Control (action 4) has been
-  written exactly once, on the ColorScaping transformer: `findme` true then
-  false against an RGBW fixture that was off. Both were accepted with
-  `result "0"`, and no other state field moved. Nothing else — no level,
-  status, or color — has ever been written.
+- Configure (action 6) is still unexercised, as is every action 4 field
+  outside `status`, `findme`, and the RGB triple — `level`, `hue`,
+  `saturation`, `mixColorTemp`, and `mode` have never been written.
 - **`findme` never appears in a fixture's read-back `state`.** It stayed
   absent before, during, and after the write above, so it looks write-only.
   Whether the fixture physically responded is unconfirmed: the fixture was

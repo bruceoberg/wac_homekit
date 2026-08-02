@@ -114,10 +114,22 @@ class TestObjStateRgbw:
 		with pytest.raises(WacValueError):
 			ObjStateRgbw(nHue=nHue)
 
-	def test_rgb_components_pass_through_unchecked(self) -> None:
-		"""Their range is unconfirmed; inventing a bound would be worse."""
+	def test_rgb_bounds_are_inclusive(self) -> None:
+		"""Measured: 255 is full, not the 10000 every other field uses."""
 
-		assert ObjStateRgbw(tplRgb=(-5, 999, 0))["red"] == -5
+		assert ObjStateRgbw(tplRgb=(0, 0, 0)) == {"red": 0, "green": 0, "blue": 0}
+		assert ObjStateRgbw(tplRgb=(255, 255, 255)) == {
+			"red": 255,
+			"green": 255,
+			"blue": 255,
+		}
+
+	@pytest.mark.parametrize("tplRgb", [(-1, 0, 0), (0, 256, 0), (0, 0, 10000)])
+	def test_rejects_rgb_out_of_range(self, tplRgb: tuple[int, int, int]) -> None:
+		"""10000 is the trap: every neighbouring field really does go that high."""
+
+		with pytest.raises(WacValueError):
+			ObjStateRgbw(tplRgb=tplRgb)
 
 
 class TestObjStateFan:
