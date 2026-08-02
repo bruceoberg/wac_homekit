@@ -22,6 +22,22 @@ __author_email__ = metadata(__project__)["Author-email"]
 g_pathCode = Path(__file__).parent
 
 from .client import CClient, GROUP_ADDR_ALL
+from .control import (
+	COLOR_TEMP_LEVEL_MAX,
+	COLOR_TEMP_LEVEL_MIN,
+	FAN_SPEED_MAX,
+	FAN_SPEED_MIN,
+	HUE_MAX,
+	HUE_MIN,
+	LEVEL_MAX,
+	LEVEL_MIN,
+	SATURATION_MAX,
+	SATURATION_MIN,
+	ObjStateFan,
+	ObjStateLight,
+	ObjStateRgbw,
+	ObjStateWhite,
+)
 from .discovery import (
 	SERVICE_TYPE,
 	CBrowser,
@@ -41,8 +57,10 @@ from .errors import (
 	WacResponseError,
 	WacTimeoutError,
 	WacTransportError,
+	WacValueError,
 )
 from .fixture import CFixtures
+from .snapshot import CSnapshot, StrNormMac
 from .models import (
 	FIXTUREK,
 	LIGHTMODE,
@@ -90,9 +108,32 @@ __all__ = [
 	"WacTransportError",
 	"WacTimeoutError",
 	"WacResponseError",
+	"WacValueError",
 	"RESULT",
 	"ErrFromResponse",
 	"ResultFromAny",
+
+	# One poll's worth of a device, and the identifiers a consumer registers
+	# things under.
+	"CSnapshot",
+	"StrNormMac",
+
+	# Control state, in device units. The bounds are exported because a
+	# consumer converting into them should not be hardcoding 10000.
+	"ObjStateLight",
+	"ObjStateWhite",
+	"ObjStateRgbw",
+	"ObjStateFan",
+	"LEVEL_MIN",
+	"LEVEL_MAX",
+	"HUE_MIN",
+	"HUE_MAX",
+	"SATURATION_MIN",
+	"SATURATION_MAX",
+	"COLOR_TEMP_LEVEL_MIN",
+	"COLOR_TEMP_LEVEL_MAX",
+	"FAN_SPEED_MIN",
+	"FAN_SPEED_MAX",
 
 	# Fixtures and the structures they carry.
 	"CFixture",

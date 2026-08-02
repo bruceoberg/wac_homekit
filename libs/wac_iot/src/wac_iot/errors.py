@@ -128,6 +128,16 @@ class WacTimeoutError(WacTransportError):
 	"""The device did not answer in time."""
 
 
+class WacValueError(WacError):
+	"""A request was rejected here, before it reached the device.
+
+	Out of range, or fields the device will not accept together. Subclasses
+	WacError so the documented promise still holds — one except clause
+	catches everything this library raises — even though this one is a
+	caller's bug rather than anything the hardware did.
+	"""
+
+
 class WacResponseError(WacError):
 	"""The device answered, but the body was not something we can read.
 

@@ -52,6 +52,13 @@ Saturation 0–100, ColorTemperature in mireds, RotationSpeed 0–100) in one
 place. Careless round-tripping between these ranges makes Home app tiles
 visibly flicker, so keep the conversions together and test them.
 
+Convert *into* the bounds `wac_iot` exports — `LEVEL_MAX`, `HUE_MAX`,
+`FAN_SPEED_MAX` and friends — rather than repeating the numbers above in
+conversion code. Build the resulting state with the typed `Control*` methods
+on `CFixtures`, not a hand-written dict: they enforce the ranges and the
+mutually-exclusive groupings (stepped white index vs. Kelvin; HSV vs. RGB
+vs. white point) in one place, and refuse before spending a request.
+
 ## The vendor spec
 
 The WAC IoT Unified REST Interface PDF is in `private/`, which is gitignored.
@@ -113,8 +120,17 @@ re-run `just dump` rather than assuming these hold.
 - No tunable white, fan, motorized trackhead, or wall-station *fixture* (type
   11) has been seen on real hardware yet. Those models are written from the
   document alone. Single color (0), RGBW (2), and ELV (6) have been seen.
-- Nothing has been *written* to a device yet — every observation so far is from
-  reads. Control (action 4) and configure (action 6) are unexercised.
+- Configure (action 6) is still unexercised. Control (action 4) has been
+  written exactly once, on the ColorScaping transformer: `findme` true then
+  false against an RGBW fixture that was off. Both were accepted with
+  `result "0"`, and no other state field moved. Nothing else — no level,
+  status, or color — has ever been written.
+- **`findme` never appears in a fixture's read-back `state`.** It stayed
+  absent before, during, and after the write above, so it looks write-only.
+  Whether the fixture physically responded is unconfirmed: the fixture was
+  off at the time and nobody was watching it. Do not treat a missing
+  `findme` as evidence that Identify failed, and do not build a HomeKit
+  Identify round trip that reads it back.
 
 ## Protocol facts that shape the design
 
@@ -131,6 +147,18 @@ re-run `just dump` rather than assuming these hold.
   array** — that returns complete structures and is still two requests total,
   not one per fixture. `CFixtures.LFixtureReadAll` does exactly this; use it
   rather than `ObjRead()`.
+
+  Higher still, `CClient.SnapPoll` pairs that with a device query and returns
+  a `CSnapshot` — fixtures keyed by address, plus `StrDeviceId` /
+  `StrFixtureId` for identifiers stable across renames and DHCP leases. One
+  transformer carries many fixtures, so a consumer needs that split; poll
+  through `SnapPoll` rather than rebuilding it.
+
+  **Build entities from `mpAddrFixtureKnown`, not `mpAddrFixture`.** The
+  type-4 pseudo-fixture is addressable like any other but has empty `state`,
+  so it would become an accessory that can never report or change anything.
+  The known map drops it, and drops any future type this library does not
+  model yet. Use the full map only for dumps and diagnostics.
 - Not every device implements every endpoint. The wall stations answer only
   `/device`, `/network`, `/ota`, and `/fs`, and return HTTP 404 with a plain
   text body for `/fixture`, `/group`, and `/automation`. Tools must degrade

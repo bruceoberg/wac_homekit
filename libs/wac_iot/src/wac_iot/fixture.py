@@ -8,7 +8,8 @@ import logging
 from enum import IntEnum
 from typing import Any
 
-from .models import CFixture
+from .control import ObjStateFan, ObjStateLight, ObjStateRgbw, ObjStateWhite
+from .models import CFixture, LIGHTMODE
 from .transport import CTransport
 
 g_log = logging.getLogger(__name__)
@@ -92,6 +93,116 @@ class CFixtures:  # tag = fixs
 		"""Action 7 — start looking for newly installed fixtures."""
 
 		return await self.trans.ObjAction(URI, self.ACTION.Search)
+
+	# Typed control. Action 4 with the state built by `control`, so the rules
+	# about which fields may travel together live in one place instead of at
+	# every call site. Pick the method matching the fixture's type; anything
+	# not covered here still goes through `ObjControl` with a hand-built dict.
+
+	async def ControlLight(
+		self,
+		nAddr: int,
+		*,
+		fOn: bool | None = None,
+		nLevel: int | None = None,
+		fFindme: bool | None = None,
+		lightmode: LIGHTMODE | None = None,
+	) -> dict[str, Any]:
+		"""Control a single color or ELV fixture (0, 6)."""
+
+		return await self.ObjControl(
+			nAddr,
+			ObjStateLight(fOn=fOn, nLevel=nLevel, fFindme=fFindme, lightmode=lightmode),
+		)
+
+	async def ControlWhite(
+		self,
+		nAddr: int,
+		*,
+		fOn: bool | None = None,
+		nLevel: int | None = None,
+		fFindme: bool | None = None,
+		lightmode: LIGHTMODE | None = None,
+		nColorTempLevel: int | None = None,
+		nColorTemp: int | None = None,
+	) -> dict[str, Any]:
+		"""Control a tunable white fixture (1, 12, 14, 15)."""
+
+		return await self.ObjControl(
+			nAddr,
+			ObjStateWhite(
+				fOn=fOn,
+				nLevel=nLevel,
+				fFindme=fFindme,
+				lightmode=lightmode,
+				nColorTempLevel=nColorTempLevel,
+				nColorTemp=nColorTemp,
+			),
+		)
+
+	async def ControlRgbw(
+		self,
+		nAddr: int,
+		*,
+		fOn: bool | None = None,
+		nLevel: int | None = None,
+		fFindme: bool | None = None,
+		lightmode: LIGHTMODE | None = None,
+		nHue: int | None = None,
+		nSaturation: int | None = None,
+		tplRgb: tuple[int, int, int] | None = None,
+		nColorTemp: int | None = None,
+	) -> dict[str, Any]:
+		"""Control an RGBW fixture (2)."""
+
+		return await self.ObjControl(
+			nAddr,
+			ObjStateRgbw(
+				fOn=fOn,
+				nLevel=nLevel,
+				fFindme=fFindme,
+				lightmode=lightmode,
+				nHue=nHue,
+				nSaturation=nSaturation,
+				tplRgb=tplRgb,
+				nColorTemp=nColorTemp,
+			),
+		)
+
+	async def ControlFan(
+		self,
+		nAddr: int,
+		*,
+		fOn: bool | None = None,
+		nFanSpeed: int | None = None,
+		fWind: bool | None = None,
+		nWindSpeed: int | None = None,
+		fDirection: bool | None = None,
+		fFindme: bool | None = None,
+	) -> dict[str, Any]:
+		"""Control a fan (13)."""
+
+		return await self.ObjControl(
+			nAddr,
+			ObjStateFan(
+				fOn=fOn,
+				nFanSpeed=nFanSpeed,
+				fWind=fWind,
+				nWindSpeed=nWindSpeed,
+				fDirection=fDirection,
+				fFindme=fFindme,
+			),
+		)
+
+	async def Identify(self, nAddr: int, *, fOn: bool = True) -> dict[str, Any]:
+		"""Make a fixture announce itself.
+
+		`findme` is shared by every fixture type that has it, so this needs
+		no per-type variant. It is what HomeKit's Identify characteristic and
+		Home Assistant's button entity both land on.
+		"""
+
+		return await self.ObjControl(nAddr, {"findme": fOn})
 
 	async def LFixtureRead(self, addr: int | list[int] | None = None) -> list[CFixture]:
 		"""Action 3, parsed into fixtures.

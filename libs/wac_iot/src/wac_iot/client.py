@@ -14,6 +14,7 @@ import aiohttp
 
 from .device import CDevice
 from .fixture import CFixtures
+from .snapshot import CSnapshot
 from .transport import CTransport
 
 # Endpoints modeled only well enough to talk to. Reachable through
@@ -96,6 +97,21 @@ class CClient:  # tag = client
 
 	async def Close(self) -> None:
 		await self.trans.Close()
+
+	async def SnapPoll(self) -> CSnapshot:
+		"""Everything a poll needs, in one call.
+
+		Three requests, not one: a device query, then the action 5 / action 3
+		pair that `LFixtureReadAll` needs because the documented bulk read
+		does not work. Collapsing them here keeps that from being every
+		consumer's problem — a Home Assistant coordinator's update method
+		becomes this line and nothing else.
+		"""
+
+		devi = await self.device.DeviQuery()
+		lFixture = await self.fixture.LFixtureReadAll()
+
+		return CSnapshot(devi, lFixture)
 
 	async def ObjAction(self, strUri: str, nAction: int, **kwargs: Any) -> dict[str, Any]:
 		"""Escape hatch for endpoints without a module yet."""
