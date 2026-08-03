@@ -24,6 +24,18 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 g_log = logging.getLogger(__name__)
 
+# Unrecognized type IDs already reported. A consumer that polls rebuilds every
+# fixture on every tick, so a type that is simply a permanent part of the
+# system — the type-4 pseudo-fixture ColorScaping hardware reports — would
+# otherwise warn every few seconds for the life of the process. Measured on a
+# bridge at a 5s interval: about 17,000 identical warnings a day about a
+# condition that will never change. Worth saying once, and only once.
+#
+# Process-lifetime, deliberately: the point is one warning per run, and a
+# consumer that wants to see it again restarts.
+
+g_setNTypeUnknownSeen: set[int] = set()
+
 
 class FIXTUREK(IntEnum):  # tag = fixturek — kinds of fixture
 	"""Fixture type identifiers.
@@ -47,7 +59,13 @@ class FIXTUREK(IntEnum):  # tag = fixturek — kinds of fixture
 
 	@classmethod
 	def _missing_(cls, value: object) -> FIXTUREK:
-		g_log.warning("unrecognized fixture type %r", value)
+		# Once per distinct ID, not once per fixture parsed — see
+		# g_setNTypeUnknownSeen. Anything unhashable is not an ID this
+		# library could report usefully anyway, so it just falls through.
+
+		if isinstance(value, int) and value not in g_setNTypeUnknownSeen:
+			g_setNTypeUnknownSeen.add(value)
+			g_log.warning("unrecognized fixture type %r", value)
 
 		return cls.Unknown
 

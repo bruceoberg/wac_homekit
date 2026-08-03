@@ -7,6 +7,7 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "hap-python>=5.0.0",
     "wac-iot[discovery]",
 ]
 
@@ -38,6 +39,18 @@ wac-iot = { workspace = true }
 [tool.mypy]
 files = ["src", "libs"]
 strict = true
+
+# HAP-python ships no py.typed marker, so everything it exports is Any.
+[[tool.mypy.overrides]]
+module = ["pyhap.*"]
+ignore_missing_imports = true
+
+# ... which makes Accessory and Bridge Any-typed bases. Subclassing them is the
+# only way to use HAP-python at all, so the two modules that do get the strict
+# rule relaxed. Nothing else in the tree may subclass an untyped base.
+[[tool.mypy.overrides]]
+module = ["wac_homekit.accessory", "wac_homekit.driver"]
+disallow_subclassing_any = false
 
 [tool.pytest.ini_options]
 # importlib mode keeps test modules out of sys.path games — required once two

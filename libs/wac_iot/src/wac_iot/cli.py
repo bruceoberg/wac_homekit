@@ -110,14 +110,27 @@ async def DiscoverRun(args: argparse.Namespace) -> int:
 		print(f"no devices answered in {args.browse:g}s")
 
 		if sys.platform == "darwin":
-			# macOS gates multicast behind Local Network privacy. A denied
-			# process sees its sendto fail with EPIPE and simply hears
-			# nothing back, which is indistinguishable from an empty network.
+			# Two mechanisms gate multicast here, and they are
+			# indistinguishable from the inside: macOS Local Network privacy,
+			# and any outbound firewall. Either way a denied process sees its
+			# sendto fail with EPIPE and simply hears nothing back, which
+			# looks exactly like an empty network. Both judge the owning
+			# application rather than the binary, so a shell hosted inside an
+			# editor is judged as that editor.
 
 			print()
-			print("on macOS, check Privacy & Security > Local Network for your terminal;")
-			print("without it multicast sends fail and this looks like an empty network.")
+			print("this is usually a blocked process, not an empty network. two causes:")
+			print("  - macOS: System Settings > Privacy & Security > Local Network")
+			print("  - an outbound firewall (Little Snitch and friends) blocking")
+			print("    UDP 5353 to 224.0.0.251")
+			print()
+			print("both judge the *host app* — a shell inside an editor is judged as")
+			print("that editor, not as your terminal, so the same command can work in")
+			print("one and fail in the other.")
+			print()
 			print("cross-check with:  dns-sd -B _easylink._tcp local")
+			print("that goes through the system mDNS daemon and is not blocked by")
+			print("either. if it lists devices and this does not, the process is blocked.")
 
 		return 1
 

@@ -81,6 +81,38 @@ re-run `just dump` rather than assuming these hold.
 - **The interface is plain HTTP on port 80.** Port 443 refuses the connection
   outright on every device tested, even though mDNS advertises it. There is no
   TLS and no certificate to deal with. `wac_iot probe` re-checks this.
+
+#### When discovery finds nothing
+
+Almost always a blocked *process*, not an empty network. Two candidates, and
+the CLI text naming only the first is incomplete:
+
+- macOS Local Network privacy (System Settings > Privacy & Security).
+- An outbound firewall. Little Snitch was the actual culprit on this machine,
+  and its denial is indistinguishable from the macOS one: `sendto` to
+  224.0.0.251 fails with `BrokenPipeError` (EPIPE) and the browse just goes
+  quiet.
+
+**The identity being judged is the host application, not the terminal.** Both
+mechanisms attribute a subprocess to the app that owns it, so a shell inside
+VS Code is judged as `com.microsoft.VSCode` — Little Snitch spells this out in
+its own log as `LSSocketFlow /Applications/Visual Studio Code.app/... via
+.../python3.14`. The same command therefore works from Terminal and fails from
+an editor-hosted shell, which reads as flakiness until you know to look.
+
+**A non-empty result does not mean discovery works.** A blocked process still
+receives loopback self-answers, so it sees this machine's own services and
+nothing else. Compare against `dns-sd -B _easylink._tcp local`, which goes
+through the system mDNSResponder and is not subject to either mechanism: if
+`dns-sd` reports a service on a real interface and the library reports nothing,
+the process is blocked. Watch the `if` column — interface 1 is loopback.
+
+Little Snitch rules should be keyed to the host app, not to the interpreter:
+a nix-store python path carries a content hash that changes on every rebuild,
+and the binary is `adhoc, linker-signed`, so its "Code ID" is a build hash
+with no developer identity behind it. Constrain by destination and port
+instead — the bridge needs outbound UDP 5353 to 224.0.0.251, outbound TCP 80
+to the transformers, and inbound TCP on the bridge's own port.
 - **`query` must be boolean `true`.** The document's example shows `"query": 1`;
   that is rejected with an undocumented result code `-100` and a `status`
   string explaining it. Status codes outside Appendix 2 exist — never assume
@@ -133,6 +165,39 @@ only writes ever made to this hardware.
   by eye. The firmware agrees, reporting `saturation: 0` afterwards. Whether
   this lights a dedicated white LED or just all three colour channels is
   unknown — the `mixColorTemp` path has never been written.
+- **`level` is writable and exact.** HomeKit 50% → `level: 5000`, 100% →
+  `level: 10000`, each accepted and stored verbatim with the colour fields
+  untouched. Note a fixture idling at 9981 reads as 100% and gets snapped to
+  10000 by the first brightness write; that is stable, not oscillating.
+
+##### Colour is read as HSV and written as RGB
+
+The single most surprising thing this hardware does, and the one a consumer
+will get wrong by reading the document. **Writing `hue` / `saturation` never
+changes the light.** Measured, in this order, on an RGBW fixture that was on
+and blue:
+
+- `{hue, saturation}` → refused, `MissingRequiredParam (-44)`, *"incorrect
+  set of HSV attributes in command, no HSV action taken"*.
+- `{hue, saturation, level}` → refused, same error.
+- `{hue, saturation, mode: 3}` → refused, same error.
+- `{hue, saturation, level, mode: 3}` → refused, same error.
+- `{red, green, blue}` → **accepted, and the light changed.**
+
+So there is no combination of HSV fields this firmware honors. Worse, after a
+`mode` write is attempted the failure mode *changes*: `{mode: 3}` is accepted
+while `mode` stays 2, and subsequent `{hue, saturation}` writes then return
+`result "0"` and are silently discarded. An accepted-and-ignored write is far
+more dangerous than a refused one — do not read a zero result on an HSV write
+as evidence that anything happened.
+
+Reads are unaffected and stay on HSV: writing `red/green/blue` moves `hue`
+and `saturation` to match, so a poll reports colour correctly. The bridge
+therefore reads HSV and writes RGB, converting in `TplRgbFromHueSat`. Round
+trip verified on hardware: HomeKit Hue 120 → RGB (0,255,0) → device `hue
+3333` → read back as 120°, exact.
+
+`mode` appears to be read-only in practice. Nothing has ever moved it.
 
 #### Where brightness lives — partly measured, partly open
 
@@ -165,6 +230,13 @@ brightness has two mechanisms that need to be chosen between. If it does
 not, `level` alone is the brightness field and the magnitude is cosmetic.
 Test in the dark: set `red: 255`, then `red: 64`, with `level` untouched.
 
+**What the bridge does meanwhile.** `TplRgbFromHueSat` pins value at full, so
+the RGB triple carries chromaticity only and `level` carries brightness
+alone. Half-saturated red is `(255, 128, 128)`, never a dimmed `(128, 0, 0)`.
+That is the choice that stays correct under either answer: if magnitude is
+cosmetic it is obviously right, and if magnitude does drive output it still
+keeps the two axes from fighting. Revisit it only once the dark test lands.
+
 Colour *hue* readings are not in doubt — cyan, red and green were each set
 from the app and read back correctly, and a blue-to-white change was
 confirmed by eye. Only the brightness axis is unresolved.
@@ -177,9 +249,10 @@ confirmed by eye. Only the brightness axis is unresolved.
 - No tunable white, fan, motorized trackhead, or wall-station *fixture* (type
   11) has been seen on real hardware yet. Those models are written from the
   document alone. Single color (0), RGBW (2), and ELV (6) have been seen.
-- Configure (action 6) is still unexercised, as is every action 4 field
-  outside `status`, `findme`, and the RGB triple — `level`, `hue`,
-  `saturation`, `mixColorTemp`, and `mode` have never been written.
+- Configure (action 6) is still unexercised. Of the action 4 fields,
+  `status`, `findme`, the RGB triple and `level` are now measured working;
+  `hue`, `saturation` and `mode` are measured *not* working (see above);
+  `mixColorTemp` has still never been written to any fixture.
 - **`findme` never appears in a fixture's read-back `state`.** It stayed
   absent before, during, and after the write above, so it looks write-only.
   Whether the fixture physically responded is unconfirmed: the fixture was
@@ -238,14 +311,122 @@ confirmed by eye. Only the brightness axis is unresolved.
   fixture, but not the type-4 pseudo-fixture above — do not treat its
   membership as equivalent to the action 5 address list.
 
+## The HomeKit side
+
+Built on HAP-python 5.0. `convert.py` owns the units, `accessory.py` turns one
+`CFixture` into one Lightbulb, `driver.py` owns the `Bridge` and the poll loop.
+Lights only — `TierTryFromFixturek` returning None is the filter, and adding a
+fixture type to `g_mpFixturekTier` is the whole change needed to bridge it.
+
+### Verified on hardware
+
+Run against the ColorScaping transformer at protocol 1.40 — three light
+fixtures (`hub`, an ELV; `water` and `sky`, both RGBW) plus the type-4
+pseudo-fixture. What the live run established:
+
+- Discovery, accessory construction, tier selection and characteristic sets
+  are all correct. The ELV got On + Brightness; the RGBW pair got On +
+  Brightness + Hue + Saturation; nothing got ColorTemperature, since no
+  tunable-white fixture exists on this transformer. The type-4 pseudo-fixture
+  was excluded.
+- Writes land exactly. HomeKit Hue 120 → device `hue 3333` → reads back 120°;
+  Brightness 50 → `level 5000` → reads back 50. No drift on any axis, so no
+  tile flicker.
+- **The reconcile-corrects-a-failed-write path is confirmed, not theoretical.**
+  The first colour write was refused by the firmware (see the HSV section
+  above). HomeKit had already optimistically shown the new value; the next
+  poll pulled it back to what the device actually holds. That is the designed
+  behaviour and it works — but note the corollary: a failed write returns
+  success to the controller, and the only correction is the next poll.
+- Three polls over ~22s produced **zero** characteristic updates once the
+  fixtures were idle, so the "only notify if the value moved" guard holds.
+- Clean SIGTERM shutdown, exit 0.
+
+Still unexercised on hardware: pairing from a real Home app, ColorTemperature
+(no tunable-white fixture exists here), and Identify.
+
+### What HAP-python actually requires
+
+- **`AccessoryDriver.start()` does not work on Python 3.14.** It installs an
+  `asyncio.SafeChildWatcher`, which 3.14 removed, and dies with an
+  `AttributeError` before the loop ever runs. Pass `loop=` and drive
+  `async_start()` / `async_stop()` yourself. That is the right shape anyway —
+  the `aiohttp` sessions inside `wac_iot` have to live on the same loop.
+- **The pincode is not persisted.** The encoder stores the MAC, the keypair,
+  the paired clients, the config version and the accessories hash — not the
+  setup code. So an unpaired restart without `--pincode` prints a different
+  code every time. After pairing it stops mattering.
+- **Use `Service.setter_callback`, not per-characteristic setters.** The Home
+  app writes On + Brightness, or On + Hue + Saturation, in a single request,
+  and the service-level callback receives the whole batch keyed by
+  characteristic display name. Splitting it per characteristic would mean two
+  or three device requests racing, and for RGBW it would send hue and
+  saturation as separate writes to one colour state — which `ObjStateRgbw`
+  is right to treat as conflicting.
+- **HAP-python has already done the optimistic update** by the time either
+  setter runs: `client_update_value` stores the value and notifies first.
+  There is nothing to set optimistically. A failed device write therefore
+  leaves HomeKit briefly ahead of the hardware, and the next poll corrects it
+  — the same path a change made from the WAC app takes.
+- **`Accessory.run_at_interval` takes a literal**, so a configurable interval
+  means applying the decorator at call time rather than at class definition:
+  `await Accessory.run_at_interval(dT)(CBridge._PollAll)(self)`. Worth keeping
+  over a hand-rolled loop, because the decorator waits on
+  `driver.aio_stop_event` and shutdown does not have to sit out a full
+  interval.
+- **Overriding `run` on a `Bridge` drops what `Bridge.run` does** — scheduling
+  each contained accessory's own `run`. Fine only while no fixture accessory
+  has one.
+- **`add_accessory` writes the persist file immediately.** Do not call it for
+  a bridge that turned out to have nothing to serve.
+- **`ColorTemperature` is not in HAP-python's Lightbulb optional list**, but
+  adding it works — the loader does not validate. Its default range is
+  140–500 mireds, so override `minValue`/`maxValue` per fixture from that
+  fixture's own `detail` or the Home app's slider will run past the hardware.
+- **HAP-python ships no `py.typed`.** Two mypy overrides in `pyproject.toml`
+  cover it: `ignore_missing_imports` for `pyhap.*`, and
+  `disallow_subclassing_any = false` for the two modules that subclass
+  `Accessory` / `Bridge`. Nothing else in the tree may subclass an untyped
+  base.
+- QR-code pairing needs the `HAP-python[QRCode]` extra, which is not
+  installed; startup prints the numeric code only.
+
+### Decisions worth not relitigating
+
+- **AIDs must be stable across restarts** — iOS remembers which accessory in a
+  bridge it paired with by AID, and a reshuffle turns every light in the Home
+  app into a stranger. `NAidFromFixtureId` is SHA-256 of `StrFixtureId`
+  truncated to six bytes and folded above 7 (1 is the bridge itself;
+  HAP-python documents 7 as unusable). `CBridge._NAidFree` still checks,
+  because the failure mode of a collision is a light that silently never
+  appears.
+- **Colour temperature endpoints snap rather than convert.** The reciprocal of
+  370 mireds is 2703K — three Kelvin inside a 2700K fixture's limit, and a
+  value that does not survive the round trip. `CColorTempRange` returns the
+  fixture's own bound at each end. When a fixture reports no span,
+  2700–6500K is the documented fallback; widen it only by reading a real
+  fixture's `detail`.
+- **Poll interval defaults to 5s**, the responsive end of the range these
+  transformers tolerate. It is also the upper bound on how long a
+  wall-station press stays invisible to HomeKit, since there is no push
+  channel.
+- A failed poll marks every accessory on that device unavailable rather than
+  leaving stale values on show, so an unplugged transformer reads as "No
+  Response" in the Home app.
+
 ## Testing
 
 The things worth testing here are the pure functions whose arithmetic is easy
 to get subtly wrong:
 
-- unit conversion between device and HomeKit ranges
+- unit conversion between device and HomeKit ranges, including round trips
+  across the whole range — an asymmetric conversion is what makes a Home app
+  tile flicker
+- tier selection, AID derivation, and the firmware-string guard
 - mDNS TXT record parsing
 - status code to exception mapping
 
 The device layer is not worth a mock HTTP server. Verify it against real
-hardware with the `dump` CLI instead.
+hardware with the `dump` CLI instead. The accessory and driver layers likewise
+need a real device and a real Home app; a HAP-python test harness would only
+be testing HAP-python.
