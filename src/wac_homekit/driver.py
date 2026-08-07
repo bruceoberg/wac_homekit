@@ -360,6 +360,20 @@ def PrintNoDevices(dTBrowse: float, strAddr: str) -> None:
 		print("either. if it lists devices and this does not, the process is blocked.")
 
 
+def PrintSetupCode(strPincode: str) -> None:
+	"""Show the setup code grouped the way the Home app asks for it.
+
+	HAP-python prints it 3-2-3, which is the format the protocol hashes but
+	not the one on screen during manual entry — the Home app offers two
+	groups of four. Printing both saves regrouping eight digits by eye at the
+	exact moment a mistyped one reads as a pairing failure.
+	"""
+
+	strDigits = strPincode.replace("-", "")
+
+	print(f"setup code: {strDigits[:4]} {strDigits[4:]}   (entered as {strPincode})")
+
+
 async def NRun(
 	*,
 	dTBrowse: float,
@@ -418,6 +432,8 @@ async def NRun(
 		loop.add_signal_handler(sig, evStop.set)
 
 	await driver.async_start()
+
+	PrintSetupCode(driver.state.pincode.decode())
 
 	try:
 		await evStop.wait()

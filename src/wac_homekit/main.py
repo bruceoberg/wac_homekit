@@ -17,19 +17,35 @@ from . import __version__
 from .driver import PERSIST_DIR_DEFAULT, POLL_INTERVAL_DEFAULT, PORT_DEFAULT, NRun
 from .netiface import IFACE_AUTO, CIfaceError
 
-# HomeKit setup codes are eight digits in a fixed 3-2-3 grouping. Checking here
-# beats letting HAP-python generate a keypair and then reject the code.
+# HomeKit setup codes are eight digits, and the 3-2-3 grouping is not
+# cosmetic: HAP-python hands the hyphenated string to SRP as the password, so
+# "426-83-591" *is* the shared secret and the hyphens are inside the hash. The
+# Home app's manual entry, meanwhile, shows two groups of four — that is
+# Apple's keypad, not the wire format, and iOS rebuilds the 3-2-3 string from
+# the digits before hashing.
+#
+# So the grouping a user sees and the grouping the protocol needs genuinely
+# differ. Accept the digits however they arrive and normalize.
 
-g_rePincode = re.compile(r"^\d{3}-\d{2}-\d{3}$")
+g_rePincodeDigits = re.compile(r"^\d{8}$")
+
+# Checking here beats letting HAP-python generate a keypair and then reject
+# the code.
 
 
 def StrPincode(strArg: str) -> str:
-	"""argparse type for a HomeKit setup code."""
+	"""argparse type for a HomeKit setup code, normalized to 3-2-3.
 
-	if not g_rePincode.match(strArg):
-		raise argparse.ArgumentTypeError(f"pincode must look like 123-45-678, got {strArg!r}")
+	Separators are stripped rather than required, so typing back the eight
+	digits the Home app just asked for works.
+	"""
 
-	return strArg
+	strDigits = re.sub(r"[\s\-]", "", strArg)
+
+	if not g_rePincodeDigits.match(strDigits):
+		raise argparse.ArgumentTypeError(f"pincode must be eight digits, got {strArg!r}")
+
+	return f"{strDigits[:3]}-{strDigits[3:5]}-{strDigits[5:]}"
 
 
 def main() -> None:
@@ -77,7 +93,7 @@ def main() -> None:
 		type=StrPincode,
 		default=None,
 		help=(
-			"HomeKit setup code as 123-45-678 "
+			"HomeKit setup code, eight digits with or without separators "
 			"(default: a fresh random one each run, printed at startup)"
 		),
 	)
