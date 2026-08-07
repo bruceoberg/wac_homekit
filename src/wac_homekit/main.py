@@ -15,6 +15,7 @@ from wac_iot import WacError
 
 from . import __version__
 from .driver import PERSIST_DIR_DEFAULT, POLL_INTERVAL_DEFAULT, PORT_DEFAULT, NRun
+from .netiface import IFACE_AUTO, CIfaceError
 
 # HomeKit setup codes are eight digits in a fixed 3-2-3 grouping. Checking here
 # beats letting HAP-python generate a keypair and then reject the code.
@@ -80,6 +81,16 @@ def main() -> None:
 			"(default: a fresh random one each run, printed at startup)"
 		),
 	)
+	parser.add_argument(
+		"--interface",
+		default=IFACE_AUTO,
+		metavar="IFACE",
+		help=(
+			"interface to browse and advertise on: an interface name (en0), "
+			"an address (10.0.0.5), 'wifi', or 'auto' "
+			f"(default: {IFACE_AUTO} — wifi if there is one, else the default route)"
+		),
+	)
 
 	args = parser.parse_args()
 
@@ -96,8 +107,16 @@ def main() -> None:
 				pathPersistDir=args.persist_dir,
 				nPort=args.port,
 				strPincode=args.pincode,
+				strIface=args.interface,
 			)
 		)
+	except CIfaceError as exc:
+		# The message already lists what the machine actually has, which is
+		# the only thing that makes a typo'd interface name diagnosable.
+
+		print(f"error: {exc}", file=sys.stderr)
+		nExit = 1
+
 	except OSError as exc:
 		# Overwhelmingly a persist directory the process cannot create or
 		# write — /var/lib/wac-homekit needs either root or --persist-dir.

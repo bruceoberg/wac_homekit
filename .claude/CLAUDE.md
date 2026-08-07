@@ -413,6 +413,25 @@ Still unexercised on hardware: pairing from a real Home app, ColorTemperature
 - A failed poll marks every accessory on that device unavailable rather than
   leaving stale values on show, so an unplugged transformer reads as "No
   Response" in the Home app.
+- **The bridge pins one interface; the default route does not get to choose.**
+  Left alone, HAP-python derives its advertised address from the default route
+  and Zeroconf browses every interface. On a machine that is on wifi and
+  ethernet at once, the advertised address then moves when a dock appears and
+  the browse answers on whichever link Zeroconf preferred — so the Home app
+  follows the bridge onto a link that disappears at the next unplug. The HAP
+  MAC is *not* the moving part: it is synthetic, generated once into the
+  persist file, and stable across interfaces. Only the address moves.
+  `StrAddrResolve` resolves one address and `NRun` hands the same one to both
+  `AccessoryDriver(address=)` and `LDiscoBrowse`, so advertising and discovery
+  cannot drift apart.
+- **`--interface` keeps its generic name on purpose.** It takes an interface
+  name, an address, `wifi`, or `auto`, and every explicit value is a hard
+  requirement — `CIfaceError` rather than a silent fallback, because a bridge
+  on the wrong interface looks like one that works right up until the machine
+  moves. Only `auto`, the default, is a preference: wifi if the machine has a
+  radio, else the default route with a warning, so a headless box with no
+  radio still runs. A `--prefer-*` name would advertise a fallback that only
+  `auto` has.
 
 ## Testing
 
@@ -425,6 +444,10 @@ to get subtly wrong:
 - tier selection, AID derivation, and the firmware-string guard
 - mDNS TXT record parsing
 - status code to exception mapping
+- interface resolution, against an injected address map rather than the live
+  machine. The `networksetup` stanza parser is the one with a real trap: the
+  device name arrives on a line *after* the port name identifying it, so a
+  naive parse returns whichever device it happened to see first.
 
 The device layer is not worth a mock HTTP server. Verify it against real
 hardware with the `dump` CLI instead. The accessory and driver layers likewise

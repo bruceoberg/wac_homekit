@@ -8,6 +8,7 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "hap-python>=5.0.0",
+    "ifaddr>=0.2.0",
     "wac-iot[discovery]",
 ]
 

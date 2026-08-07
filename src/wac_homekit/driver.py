@@ -26,6 +26,7 @@ from pyhap.accessory_driver import AccessoryDriver
 from wac_iot import CClient, CSnapshot, LDiscoBrowse, SDisco, WacError
 
 from .accessory import AID_MAX, AID_MIN, CFixtureAccessory, TierTryFromFixturek
+from .netiface import StrAddrResolve
 
 g_log = logging.getLogger(__name__)
 
@@ -256,6 +257,7 @@ def DriverBuild(
 	pathPersistDir: Path,
 	nPort: int,
 	strPincode: str | None,
+	strAddr: str,
 	loop: asyncio.AbstractEventLoop,
 ) -> AccessoryDriver:
 	"""An AccessoryDriver bound to a loop we already own.
@@ -266,11 +268,17 @@ def DriverBuild(
 	play — `async_start` / `async_stop` do everything `start` does apart from
 	owning the loop, which is ours to own anyway: the device sessions live on
 	it too.
+
+	`strAddr` is given rather than left to HAP-python for the same class of
+	reason: its own choice follows the default route, which moves when a
+	laptop is docked, and the advertised address moving is what the Home app
+	sees as the bridge disappearing.
 	"""
 
 	pathPersistDir.mkdir(parents=True, exist_ok=True)
 
 	return AccessoryDriver(
+		address=strAddr,
 		port=nPort,
 		persist_file=str(pathPersistDir / PERSIST_FILE),
 		pincode=strPincode.encode() if strPincode else None,
@@ -278,7 +286,7 @@ def DriverBuild(
 	)
 
 
-def PrintNoDevices(dTBrowse: float) -> None:
+def PrintNoDevices(dTBrowse: float, strAddr: str) -> None:
 	"""Say why an empty network is probably not an empty network.
 
 	The same guidance `wac_iot discover` prints, because the failure looks
@@ -286,7 +294,10 @@ def PrintNoDevices(dTBrowse: float) -> None:
 	than an absent device.
 	"""
 
-	print(f"no WAC devices answered in {dTBrowse:g}s — nothing to bridge")
+	print(f"no WAC devices answered in {dTBrowse:g}s on {strAddr} — nothing to bridge")
+	print()
+	print("if the device is on a link this address cannot reach, name the right")
+	print("one with --interface (an interface name, an address, or 'wifi').")
 
 	if sys.platform == "darwin":
 		print()
@@ -311,13 +322,21 @@ async def NRun(
 	pathPersistDir: Path,
 	nPort: int,
 	strPincode: str | None,
+	strIface: str,
 ) -> int:
 	"""Discover, bridge, serve, and shut down cleanly. Returns an exit code."""
 
-	lDisco = await LDiscoBrowse(dTBrowse)
+	# Resolved once and used for both halves, so the interface we browse on
+	# and the address we advertise can never drift apart.
+
+	strAddr = StrAddrResolve(strIface)
+
+	g_log.info("bridging on %s", strAddr)
+
+	lDisco = await LDiscoBrowse(dTBrowse, [strAddr])
 
 	if not lDisco:
-		PrintNoDevices(dTBrowse)
+		PrintNoDevices(dTBrowse, strAddr)
 
 		return 1
 
@@ -328,6 +347,7 @@ async def NRun(
 		pathPersistDir=pathPersistDir,
 		nPort=nPort,
 		strPincode=strPincode,
+		strAddr=strAddr,
 		loop=loop,
 	)
 

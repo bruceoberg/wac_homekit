@@ -889,6 +889,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "hap-python" },
+    { name = "ifaddr" },
     { name = "wac-iot", extra = ["discovery"] },
 ]
 
@@ -901,6 +902,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "hap-python", specifier = ">=5.0.0" },
+    { name = "ifaddr", specifier = ">=0.2.0" },
     { name = "wac-iot", extras = ["discovery"], editable = "libs/wac_iot" },
 ]
 
