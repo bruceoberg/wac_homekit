@@ -218,7 +218,7 @@ class CBrowser:  # tag = browser
 
 	g_dTResolve = 3.0  # seconds to wait for a service's details
 
-	def __init__(self) -> None:
+	def __init__(self, lStrAddr: list[str] | None = None) -> None:
 		if not FIsZeroconfAvailable():
 			raise RuntimeError(
 				"CBrowser needs the zeroconf package: install wac_iot[discovery]. "
@@ -230,10 +230,25 @@ class CBrowser:  # tag = browser
 		self.mpStrDisco: dict[str, SDisco] = {}
 		self.lTask: list[asyncio.Task[None]] = []
 
+		# Local IPv4 addresses to browse from, or None for every interface.
+		# A machine with two links onto the same subnet — a laptop on wifi and
+		# a dock at once — otherwise browses on whichever one Zeroconf
+		# happens to pick. Plain addresses, so nothing about how the caller
+		# chose them leaks in here.
+
+		self.lStrAddr = lStrAddr
+
 	async def __aenter__(self) -> CBrowser:
 		from zeroconf.asyncio import AsyncZeroconf
 
-		self.azc = AsyncZeroconf()
+		# Zeroconf's own default is every interface, and it is not the same
+		# thing as passing a list of all of them — so branch rather than
+		# compute a list to hand over.
+
+		if self.lStrAddr:
+			self.azc = AsyncZeroconf(interfaces=self.lStrAddr)
+		else:
+			self.azc = AsyncZeroconf()
 
 		return self
 
@@ -310,8 +325,11 @@ class CBrowser:  # tag = browser
 		self.mpStrDisco[strName] = DiscoFromServiceInfo(info)
 
 
-async def LDiscoBrowse(dTBrowse: float = 5.0) -> list[SDisco]:
-	"""Convenience one-shot browse."""
+async def LDiscoBrowse(
+	dTBrowse: float = 5.0,
+	lStrAddr: list[str] | None = None,
+) -> list[SDisco]:
+	"""Convenience one-shot browse, optionally pinned to local addresses."""
 
-	async with CBrowser() as browser:
+	async with CBrowser(lStrAddr) as browser:
 		return await browser.LDiscoBrowse(dTBrowse)
