@@ -14,14 +14,18 @@ fixture count and learn nothing extra.
 from __future__ import annotations  # Forward refs without quotes
 
 import asyncio
+import json
 import logging
 import signal
 import sys
 
+from io import StringIO
 from pathlib import Path
+from typing import Any, TextIO
 
 from pyhap.accessory import Accessory, Bridge
 from pyhap.accessory_driver import AccessoryDriver
+from pyhap.encoder import AccessoryEncoder
 
 from wac_iot import CClient, CSnapshot, LDiscoBrowse, SDisco, WacError
 
@@ -252,6 +256,46 @@ class CBridge(Bridge):  # tag = bridge
 		await self.CloseClients()
 
 
+class CEncoderPretty:  # tag = encp
+	"""HAP-python's state encoder, writing JSON a human can read.
+
+	The stock encoder emits the whole file as one long line. That file is the
+	only place the bridge's identity lives — its MAC, its keypair, its config
+	version, and which controllers are paired with it — so reading it by eye
+	is how you answer "is anything actually paired?" without a running
+	bridge. Cheap whitespace for a file written once per config change.
+
+	Delegates rather than subclasses, for two reasons. The field list is
+	HAP-python's to own, so round-tripping through its encoder means a field
+	added upstream shows up here for free instead of silently going missing.
+	And `AccessoryDriver` only duck-types this, so nothing has to inherit an
+	`Any` base — which keeps the subclassing exemption limited to the two
+	modules that genuinely need it.
+
+	`persist` and `load_into` are named by HAP-python's interface, not by our
+	conventions.
+	"""
+
+	@staticmethod
+	def persist(fp: TextIO, state: Any) -> None:
+		fpBuf = StringIO()
+
+		AccessoryEncoder.persist(fpBuf, state)
+
+		# Insertion order is kept rather than sorted: HAP-python emits
+		# identity first and key material last, which reads better than
+		# alphabetical would.
+
+		json.dump(json.loads(fpBuf.getvalue()), fp, indent="\t")
+
+	@staticmethod
+	def load_into(fp: TextIO, state: Any) -> None:
+		# Unchanged — `json.load` neither knows nor cares about the whitespace,
+		# so a file written by either encoder loads under either.
+
+		AccessoryEncoder.load_into(fp, state)
+
+
 def DriverBuild(
 	*,
 	pathPersistDir: Path,
@@ -282,6 +326,7 @@ def DriverBuild(
 		port=nPort,
 		persist_file=str(pathPersistDir / PERSIST_FILE),
 		pincode=strPincode.encode() if strPincode else None,
+		encoder=CEncoderPretty(),
 		loop=loop,
 	)
 
