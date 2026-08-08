@@ -11,6 +11,11 @@ Pinning one interface fixes both halves at once — the same address is handed
 to HAP-python to advertise and to `wac_iot` to browse on, so they cannot
 disagree.
 
+What that does *not* pin is the set of interfaces HAP-python multicasts its
+own mDNS announcement over: it builds its own Zeroconf and we never hand it
+one, so the announcement still goes out everywhere. Only the address inside
+the record is ours to choose, and that is the part a controller acts on.
+
 Nothing here is HomeKit-specific, but it lives on this side of the boundary
 on purpose: `wac_iot` takes plain addresses and stays free of any
 platform-sniffing.

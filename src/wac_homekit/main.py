@@ -102,8 +102,9 @@ def main() -> None:
 		default=IFACE_AUTO,
 		metavar="IFACE",
 		help=(
-			"interface to browse and advertise on: an interface name (en0), "
-			"an address (10.0.0.5), 'wifi', or 'auto' "
+			"interface to browse for devices on, and whose address the bridge "
+			"binds and advertises: an interface name (en0), an address "
+			"(10.0.0.5), 'wifi', or 'auto' "
 			f"(default: {IFACE_AUTO} — wifi if there is one, else the default route)"
 		),
 	)

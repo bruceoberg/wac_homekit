@@ -241,6 +241,49 @@ Colour *hue* readings are not in doubt — cyan, red and green were each set
 from the app and read back correctly, and a blue-to-white change was
 confirmed by eye. Only the brightness axis is unresolved.
 
+#### One request at a time, per device
+
+The firmware answers serially no matter how many requests are in flight, so
+overlapping them gains nothing and starts costing failures. Measured on the
+ColorScaping transformer, read-only throughout — `/device` with `query` and
+`/fixture` action 5, neither of which carries a write. Serialized means one
+`CTransport` with its lock; concurrent means one transport per caller, which
+reproduces the pre-lock behaviour exactly.
+
+| callers | endpoint | serialized | concurrent |
+|---|---|---|---|
+| 8  | `/fixture` a5 | 8 ok, 0.62s  | 8 ok, 1.25s |
+| 16 | `/fixture` a5 | 16 ok, 1.24s | **2 failed**, 3.09s |
+| 24 | `/fixture` a5 | 24 ok, 1.86s | **1 failed**, 4.46s |
+| 8  | `/device`     | 8 ok, 2.56s  | 8 ok, 2.46s |
+| 16 | `/device`     | 16 ok, 5.14s | **2 failed** |
+| 24 | `/device`     | 24 ok, 7.82s | **7 failed** |
+
+- **Serializing never failed** — zero errors in every row, at every load.
+- **Unserialized sheds requests from 16 concurrent up**, as `WacTimeoutError`
+  on `/device` and `WacTransportError` (connection reset) on `/fixture`.
+- **Serializing is also faster** where it matters: 24 `/fixture` reads in
+  1.86s against 4.46s. Piling requests on does not merely risk failure, it
+  slows the firmware down. `/device` concurrent looks quicker at 24 callers
+  only because seven of them gave up.
+- **At three or four concurrent requests neither mode fails**, which is all a
+  bridge generates on its own. The lock matters when other clients are also
+  talking — a phone, a home hub, the WAC app.
+- **It serializes only *our* traffic.** Other clients are separate TCP peers
+  and can still overload the device. This removes our contribution to a
+  pile-up; it does not immunise anything.
+
+The lock lives on `CTransport`, which is already one per device, so a
+consumer holding several transformers still talks to all of them at once. It
+is held across retries and their backoff rather than one attempt: a device
+that just timed out is the last thing that should get a second conversation
+while the first is still backing off.
+
+This was first seen in the field rather than in a benchmark — a live bridge
+polling every 5s, with a phone, a home hub and the WAC app all on the same
+transformer, produced `poll failed` and one `control failed`, and that lost
+control was a real user toggle that never reached the hardware.
+
 ### Still unverified
 
 - Tunable white accepts `colorTempLevel` (steps 1–7) *or* `mixColorTemp`
@@ -422,8 +465,20 @@ Still unexercised on hardware: pairing from a real Home app, ColorTemperature
   MAC is *not* the moving part: it is synthetic, generated once into the
   persist file, and stable across interfaces. Only the address moves.
   `StrAddrResolve` resolves one address and `NRun` hands the same one to both
-  `AccessoryDriver(address=)` and `LDiscoBrowse`, so advertising and discovery
-  cannot drift apart.
+  `AccessoryDriver(address=)` and `LDiscoBrowse`.
+- **`--interface` pins three things, and there is a fourth it does not.**
+  Pinned: the address HAP-python binds and listens on, the address it puts in
+  the advertised A record, and the interface `wac_iot` browses for devices on.
+  *Not* pinned: the set of interfaces HAP-python multicasts its own mDNS
+  announcement over. `AccessoryDriver` builds its own Zeroconf and we never
+  hand it one, so the announcement goes out everywhere — visible as a
+  `Host is down` (`EHOSTDOWN`) traceback from a socket bound to `0.0.0.0`
+  whenever a `utun` from a VPN is up, since those interfaces do not carry
+  multicast. Harmless, because the record *content* is still the pinned
+  address, so a controller that hears the announcement on any link connects
+  to the right one. Fixable by passing `zeroconf_instance=` — until then, do
+  not read the earlier phrasing "advertising and discovery cannot drift
+  apart" as covering the interface set. It covers the address only.
 - **`--interface` keeps its generic name on purpose.** It takes an interface
   name, an address, `wifi`, or `auto`, and every explicit value is a hard
   requirement — `CIfaceError` rather than a silent fallback, because a bridge
