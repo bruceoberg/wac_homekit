@@ -114,6 +114,28 @@ class CTransport:  # tag = trans
 		self.session = session
 		self._fCloseSession = False  # true only for a session we built ourselves
 
+		# One request in flight per device, always.
+		#
+		# These are ESP32-class controllers with very few connection slots.
+		# Measured against a ColorScaping transformer serving a HomeKit bridge:
+		# a 5s poll (three requests) overlapping a control write produced
+		# timeouts and `Connection reset by peer`, while the same requests
+		# issued one after another all succeed. Concurrency buys nothing here
+		# — the device answers serially regardless — and costs failures.
+		#
+		# Held across retries and their backoff, not just one attempt. A device
+		# that has just timed out is the last thing that should receive a second
+		# conversation while the first is still backing off. The cost is that a
+		# caller can wait out a full retry sequence behind a failing request,
+		# which is the right trade: it is waiting on a device that is not
+		# answering anyway.
+		#
+		# One transport is one device, so this serializes per device and not
+		# across them. A bridge holding several transformers still talks to all
+		# of them at once.
+
+		self.lock = asyncio.Lock()
+
 	def StrUrl(self, strUri: str) -> str:
 		"""Absolute URL for an endpoint path."""
 
@@ -157,7 +179,8 @@ class CTransport:  # tag = trans
 
 		assert self.session is not None  # narrowed for mypy; Open() guarantees it
 
-		objResponse = await self._ObjPostRetry(strUri, obj)
+		async with self.lock:
+			objResponse = await self._ObjPostRetry(strUri, obj)
 
 		err = ErrFromResponse(objResponse)
 		if err is not None:
