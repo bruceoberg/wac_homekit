@@ -110,9 +110,16 @@ def main() -> None:
 
 	args = parser.parse_args()
 
+	# Milliseconds, not just seconds. The failures worth diagnosing here are
+	# requests colliding on one device, and at a 5s poll interval two of those
+	# land inside the same second — a whole-second stamp cannot separate them.
+	# journald stamps its own lines, so this duplicates under systemd; that is
+	# cheaper than not being able to read an interactive run.
+
 	logging.basicConfig(
 		level=logging.DEBUG if args.verbose else logging.INFO,
-		format="%(levelname)s %(name)s: %(message)s",
+		format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
+		datefmt="%H:%M:%S",
 	)
 
 	try:
