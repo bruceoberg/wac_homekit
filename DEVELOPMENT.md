@@ -20,8 +20,13 @@ libs/wac_iot/
 `{ workspace = true }`, so it resolves to the local checkout rather than an
 index. The two are kept separate on purpose: `wac_iot` is meant to be lifted
 out later as a standalone package. See `.claude/CLAUDE.md` for the rules that
-keeps the boundary honest — in short, `wac_iot` never imports anything
+keep the boundary honest — in short, `wac_iot` never imports anything
 HomeKit-related, and `wac_homekit` never talks HTTP or mDNS directly.
+
+`wac_iot` carries its own `libs/wac_iot/.claude/CLAUDE.md`, holding the vendor
+protocol notes and the hardware measurements that contradict them. Record new
+device findings there, not at the root, so they travel with the package when
+it is extracted.
 
 Both packages ship `py.typed`; mypy runs strict over `src/` and `libs/` in one
 pass.
