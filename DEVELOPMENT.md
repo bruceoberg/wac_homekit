@@ -23,10 +23,12 @@ out later as a standalone package. See `.claude/CLAUDE.md` for the rules that
 keep the boundary honest — in short, `wac_iot` never imports anything
 HomeKit-related, and `wac_homekit` never talks HTTP or mDNS directly.
 
-`wac_iot` carries its own `libs/wac_iot/.claude/CLAUDE.md`, holding the vendor
-protocol notes and the hardware measurements that contradict them. Record new
-device findings there, not at the root, so they travel with the package when
-it is extracted.
+`wac_iot` carries its own rules in `libs/wac_iot/.claude/rules/`, holding the
+vendor protocol notes and the hardware measurements that contradict them.
+Record new device findings there, not at the root, so they travel with the
+package when it is extracted. Nested rules load on demand, so they reach Claude
+whenever anything under `libs/wac_iot/` is read — a bare `CLAUDE.md` in a
+subdirectory would too, but this repo keeps those out of package directories.
 
 Both packages ship `py.typed`; mypy runs strict over `src/` and `libs/` in one
 pass.

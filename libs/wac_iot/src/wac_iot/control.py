@@ -12,7 +12,7 @@ testing: the arithmetic is the consumer's job, but the range checks and the
 mutually-exclusive groupings are ours.
 
 Values stay in device units. Converting from a platform's ranges is the
-consumer's job, deliberately — see this package's CLAUDE.md.
+consumer's job, deliberately — see this package's `.claude/rules/`.
 
 Partly exercised against real hardware: `status`, `findme` and the RGB
 triple have been written to an RGBW fixture, and the RGB-against-HSV

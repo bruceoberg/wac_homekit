@@ -7,10 +7,10 @@ what you read off a model is spelled exactly like what came off the wire, so
 a dump can be diffed against a raw response without a translation step.
 
 Values are in device units, deliberately untranslated — see the unit
-conversion rules in this package's CLAUDE.md. Every model allows unknown keys
-and defaults every field to None: the vendor documentation is known to
-disagree with real hardware, and silently dropping a field we were not
-told about would defeat the whole point of the `dump` CLI.
+conversion rules under this package's `.claude/rules/`. Every model allows
+unknown keys and defaults every field to None: the vendor documentation is
+known to disagree with real hardware, and silently dropping a field we were
+not told about would defeat the whole point of the `dump` CLI.
 """
 
 from __future__ import annotations  # Forward refs without quotes

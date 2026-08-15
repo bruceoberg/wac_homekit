@@ -22,7 +22,7 @@ Two packages in one uv workspace:
 
 - `src/wac_homekit/` — the bridge. Owns everything HomeKit.
 - `libs/wac_iot/src/wac_iot/` — the device library. Owns everything WAC, and
-  carries its own `libs/wac_iot/.claude/CLAUDE.md`.
+  carries its own rules in `libs/wac_iot/.claude/rules/`.
 
 ## Hard rules
 
@@ -64,9 +64,10 @@ vs. white point) in one place, and refuse before spending a request.
 
 Everything about the WAC protocol — the confidential vendor spec, the hardware
 measurements that contradict it, and `wac_iot`'s own API contract — lives in
-**`libs/wac_iot/.claude/CLAUDE.md`**. Read it before touching anything that
-talks to a device, and record new hardware findings *there* rather than here,
-so the notes travel with the library when it is extracted.
+**`libs/wac_iot/.claude/rules/wac-iot.md`**. It is a nested rule, so it loads
+by itself whenever anything under `libs/wac_iot/` is read; record new hardware
+findings *there* rather than here, so they travel with the library when it is
+extracted. Nothing in that subtree should need a rule at this level.
 
 The two facts from it most likely to bite on the HomeKit side:
 
