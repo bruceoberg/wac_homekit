@@ -19,11 +19,36 @@ from pydantic import BaseModel
 
 from . import __version__
 from .client import CClient
+from .control import (
+	COLOR_TEMP_LEVEL_MAX,
+	COLOR_TEMP_LEVEL_MIN,
+	FAN_SPEED_MAX,
+	FAN_SPEED_MIN,
+	HUE_MAX,
+	HUE_MIN,
+	LEVEL_MAX,
+	LEVEL_MIN,
+	RGB_MAX,
+	SATURATION_MAX,
+	SATURATION_MIN,
+	ObjStateFan,
+	ObjStateLight,
+	ObjStateRgbw,
+	ObjStateWhite,
+)
 from .device import SDeviceInfo
 from .discovery import LDiscoBrowse
-from .errors import WacError
+from .errors import WacError, WacValueError
 from .fixture import CFixtures
-from .models import CFixture
+from .models import (
+	LIGHTMODE,
+	CFixture,
+	SState,
+	SStateFan,
+	SStateLight,
+	SStateRgbw,
+	SStateWhite,
+)
 from .transport import PORT_HTTP, PORT_HTTPS, ProbeHost, SPortProbe
 
 
@@ -319,6 +344,236 @@ async def DumpRun(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# set — the only subcommand that writes
+# ---------------------------------------------------------------------------
+
+# Every measurement recorded in this package's rules has the same shape: what
+# the fixture held, what went out on the wire, what came back, and — the part
+# that keeps being the surprise — which *other* fields moved. So this prints
+# all four rather than just firing the request.
+
+
+def TplRgbParse(strArg: str) -> tuple[int, int, int]:
+	"""argparse type for an R,G,B triple.
+
+	Components are 0-255, unlike everything else here. Range checking is left
+	to the builder, which words the complaint better.
+	"""
+
+	lStr = strArg.replace(",", " ").split()
+
+	if len(lStr) != 3:
+		raise argparse.ArgumentTypeError(f"rgb takes three components, got {strArg!r}")
+
+	try:
+		nRed, nGreen, nBlue = (int(strOne) for strOne in lStr)
+	except ValueError:
+		raise argparse.ArgumentTypeError(f"rgb components must be integers, got {strArg!r}") from None
+
+	return (nRed, nGreen, nBlue)
+
+
+def LightmodeParse(strArg: str) -> LIGHTMODE:
+	"""argparse type for a light mode, by name."""
+
+	mpStrLightmode = {
+		lightmode.name.lower(): lightmode
+		for lightmode in LIGHTMODE
+		if lightmode is not LIGHTMODE.Unknown
+	}
+
+	lightmode = mpStrLightmode.get(strArg.lower())
+
+	if lightmode is None:
+		raise argparse.ArgumentTypeError(
+			f"unknown mode {strArg!r} — one of {', '.join(sorted(mpStrLightmode))}"
+		)
+
+	return lightmode
+
+
+# Which builder takes which flag. A field the fixture's own builder does not
+# accept has to be refused rather than dropped: a hardware test that reports
+# success while changing nothing is worse than one that fails outright.
+
+g_setStrArgLight = frozenset({"fOn", "nLevel", "fFindme", "lightmode"})
+g_setStrArgWhite = g_setStrArgLight | {"nColorTempLevel", "nColorTemp"}
+g_setStrArgRgbw  = g_setStrArgLight | {"nHue", "nSaturation", "tplRgb", "nColorTemp"}
+g_setStrArgFan   = frozenset({"fOn", "fFindme", "nFanSpeed", "fWind", "nWindSpeed", "fDirection"})
+
+# Builder keyword back to the flag that set it, so a refusal names what the
+# user typed rather than what the library calls it.
+
+g_mpStrArgStrFlag = {
+	"fOn":             "--on/--off",
+	"nLevel":          "--level",
+	"fFindme":         "--findme",
+	"lightmode":       "--mode",
+	"nHue":            "--hue",
+	"nSaturation":     "--saturation",
+	"tplRgb":          "--rgb",
+	"nColorTemp":      "--color-temp",
+	"nColorTempLevel": "--color-temp-level",
+	"nFanSpeed":       "--fan-speed",
+	"fWind":           "--wind/--no-wind",
+	"nWindSpeed":      "--wind-speed",
+	"fDirection":      "--fan-direction",
+}
+
+
+def MpStrArgControl(args: argparse.Namespace) -> dict[str, Any]:
+	"""The builder keywords the user actually asked for.
+
+	Unset options are dropped rather than passed as None, so the request
+	carries only what is changing — which is what the firmware wants, and
+	what makes a read-back diff mean anything.
+	"""
+
+	mpStrArg: dict[str, Any] = {
+		"fOn":             args.fOn,
+		"nLevel":          args.level,
+		"fFindme":         args.findme,
+		"lightmode":       args.mode,
+		"nHue":            args.hue,
+		"nSaturation":     args.saturation,
+		"tplRgb":          args.rgb,
+		"nColorTemp":      args.color_temp,
+		"nColorTempLevel": args.color_temp_level,
+		"nFanSpeed":       args.fan_speed,
+		"fWind":           args.fWind,
+		"nWindSpeed":      args.wind_speed,
+		"fDirection":      None if args.fan_direction is None else bool(args.fan_direction),
+	}
+
+	return {strArg: obj for strArg, obj in mpStrArg.items() if obj is not None}
+
+
+def CheckArgsSupported(mpStrArg: dict[str, Any], setStrOk: frozenset[str], strShape: str) -> None:
+	lStrFlag = sorted(g_mpStrArgStrFlag[strArg] for strArg in mpStrArg if strArg not in setStrOk)
+
+	if lStrFlag:
+		raise WacValueError(f"a {strShape} fixture does not take {', '.join(lStrFlag)}")
+
+
+def ObjStateByShape(state: SState, mpStrArg: dict[str, Any]) -> dict[str, Any]:
+	"""Build control state with the builder matching the fixture's wire shape.
+
+	Dispatch is on the state class `wac_iot` already picked for this fixture
+	type, not on a second type-to-capability table that could drift from it.
+	Order matters: white, RGBW and motor all derive from the plain light
+	shape.
+
+	The state is built here and sent by the caller, rather than going through
+	the `Control*` convenience methods, only so the exact body can be printed
+	before it goes out. Same builders, same range and exclusion checks.
+	"""
+
+	if isinstance(state, SStateRgbw):
+		CheckArgsSupported(mpStrArg, g_setStrArgRgbw, "RGBW")
+
+		return ObjStateRgbw(**mpStrArg)
+
+	if isinstance(state, SStateWhite):
+		CheckArgsSupported(mpStrArg, g_setStrArgWhite, "tunable white")
+
+		return ObjStateWhite(**mpStrArg)
+
+	if isinstance(state, SStateFan):
+		CheckArgsSupported(mpStrArg, g_setStrArgFan, "fan")
+
+		return ObjStateFan(**mpStrArg)
+
+	if isinstance(state, SStateLight):
+		# A motorized trackhead lands here too. It dims like any other light,
+		# and aim and zoom have no builder yet.
+
+		CheckArgsSupported(mpStrArg, g_setStrArgLight, "single color")
+
+		return ObjStateLight(**mpStrArg)
+
+	raise WacValueError(f"nothing controllable on a {type(state).__name__} fixture")
+
+
+def PrintStateMoved(mpStrBefore: dict[str, Any], mpStrAfter: dict[str, Any]) -> None:
+	"""Every field that moved, whether the request mentioned it or not.
+
+	Writing the RGB triple also moves hue and saturation, which no request
+	ever asks for. Catching that is most of why this subcommand exists.
+	"""
+
+	lStrLine = [
+		f"  {strKey}: {mpStrBefore.get(strKey)!r} -> {mpStrAfter.get(strKey)!r}"
+		for strKey in sorted(set(mpStrBefore) | set(mpStrAfter))
+		if mpStrBefore.get(strKey) != mpStrAfter.get(strKey)
+	]
+
+	print("--- moved ---")
+	print("\n".join(lStrLine) if lStrLine else "  nothing")
+
+
+async def FixtureTryRead(client: CClient, nAddr: int) -> CFixture | None:
+	lFixture = await client.fixture.LFixtureRead(nAddr)
+
+	return lFixture[0] if lFixture else None
+
+
+async def SetRun(args: argparse.Namespace) -> int:
+	"""Read one fixture, write it, read it back, report what moved."""
+
+	mpStrArg = MpStrArgControl(args)
+
+	if not mpStrArg:
+		print("nothing to set — pass --on/--off, --level, --rgb, or another field", file=sys.stderr)
+
+		return 2
+
+	async with CClient(
+		args.host,
+		fTls=args.https,
+		nPort=args.port,
+		dTTimeout=args.timeout,
+		fVerifyTls=args.verify_tls,
+	) as client:
+		print(f"setting {client.strBaseUrl} fixture {args.addr}")
+
+		fixture = await FixtureTryRead(client, args.addr)
+
+		if fixture is None:
+			print(f"!! no fixture at address {args.addr}", file=sys.stderr)
+
+			return 1
+
+		print(f"  {fixture.StrDescribe()}")
+
+		mpStrBefore = MpModelPrune(fixture.state)
+		PrintJson(mpStrBefore, "state before")
+
+		objState = ObjStateByShape(fixture.state, mpStrArg)
+		PrintJson(objState, "state sent")
+
+		PrintJson(await client.fixture.ObjControl(args.addr, objState), "response")
+
+		# The firmware answers before the fixture has necessarily settled, and
+		# an immediate read-back has been seen to report the old value.
+
+		if args.settle:
+			await asyncio.sleep(args.settle)
+
+		fixtureAfter = await FixtureTryRead(client, args.addr)
+
+		if fixtureAfter is None:
+			print(f"!! fixture {args.addr} vanished between write and read-back", file=sys.stderr)
+
+			return 1
+
+		mpStrAfter = MpModelPrune(fixtureAfter.state)
+		PrintJson(mpStrAfter, "state after")
+		PrintStateMoved(mpStrBefore, mpStrAfter)
+
+	return 0
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -417,6 +672,134 @@ def main() -> None:
 	)
 	AddHostArgs(parserDump)
 	parserDump.set_defaults(run=DumpRun)
+
+	parserSet = subparsers.add_parser(
+		"set",
+		parents=[parserCommon],
+		help="write one fixture's control state (the only subcommand that writes)",
+		description=(
+			"Read one fixture, send it a control state, then read it back and "
+			"report every field that moved — including the ones the request "
+			"never mentioned. Values are device units exactly as the fixture "
+			"reports them; nothing is converted here."
+		),
+	)
+	AddHostArgs(parserSet)
+	parserSet.add_argument(
+		"--addr",
+		type=int,
+		required=True,
+		help="fixture address, as listed by `dump`",
+	)
+	parserSet.add_argument(
+		"--on",
+		dest="fOn",
+		action="store_true",
+		default=None,
+		help="turn the fixture on",
+	)
+	parserSet.add_argument(
+		"--off",
+		dest="fOn",
+		action="store_false",
+		help="turn the fixture off",
+	)
+	parserSet.add_argument(
+		"--level",
+		type=int,
+		default=None,
+		metavar="N",
+		help=f"brightness, {LEVEL_MIN}-{LEVEL_MAX} in 0.01%% steps",
+	)
+	parserSet.add_argument(
+		"--hue",
+		type=int,
+		default=None,
+		metavar="N",
+		help=f"hue, {HUE_MIN}-{HUE_MAX} (measured not to work on real firmware — use --rgb)",
+	)
+	parserSet.add_argument(
+		"--saturation",
+		type=int,
+		default=None,
+		metavar="N",
+		help=f"saturation, {SATURATION_MIN}-{SATURATION_MAX} (see --hue)",
+	)
+	parserSet.add_argument(
+		"--rgb",
+		type=TplRgbParse,
+		default=None,
+		metavar="R,G,B",
+		help=f"color as an RGB triple, each component 0-{RGB_MAX} — the way color is written",
+	)
+	parserSet.add_argument(
+		"--color-temp",
+		type=int,
+		default=None,
+		metavar="K",
+		help="color temperature in kelvin (mixColorTemp); bounds are per-fixture, in its detail",
+	)
+	parserSet.add_argument(
+		"--color-temp-level",
+		type=int,
+		default=None,
+		metavar="N",
+		help=f"stepped white index, {COLOR_TEMP_LEVEL_MIN}-{COLOR_TEMP_LEVEL_MAX}",
+	)
+	parserSet.add_argument(
+		"--mode",
+		type=LightmodeParse,
+		default=None,
+		help="light mode by name (nothing has ever moved this on real firmware)",
+	)
+	parserSet.add_argument(
+		"--findme",
+		action="store_true",
+		default=None,
+		help="make the fixture announce itself; write-only, so it never reads back",
+	)
+	parserSet.add_argument(
+		"--fan-speed",
+		type=int,
+		default=None,
+		metavar="N",
+		help=f"fan gear, {FAN_SPEED_MIN}-{FAN_SPEED_MAX} (not a percentage)",
+	)
+	parserSet.add_argument(
+		"--wind",
+		dest="fWind",
+		action="store_true",
+		default=None,
+		help="enable the fan's wind model",
+	)
+	parserSet.add_argument(
+		"--no-wind",
+		dest="fWind",
+		action="store_false",
+		help="disable the fan's wind model",
+	)
+	parserSet.add_argument(
+		"--wind-speed",
+		type=int,
+		default=None,
+		metavar="N",
+		help=f"wind gear, {FAN_SPEED_MIN}-{FAN_SPEED_MAX}",
+	)
+	parserSet.add_argument(
+		"--fan-direction",
+		type=int,
+		choices=(0, 1),
+		default=None,
+		help="fan direction; which way each value turns is undocumented",
+	)
+	parserSet.add_argument(
+		"--settle",
+		type=float,
+		default=0.5,
+		metavar="SEC",
+		help="seconds to wait before reading the state back (default: 0.5)",
+	)
+	parserSet.set_defaults(run=SetRun)
 
 	args = parser.parse_args()
 

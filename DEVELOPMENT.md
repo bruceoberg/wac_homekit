@@ -61,6 +61,7 @@ uv run wac_iot --help       # the device-layer CLI (discover / probe / dump)
 just test               # pytest across both packages
 just check              # mypy strict, src/ and libs/
 just dump --host <addr> # dump a real device's state
+just set --host <addr> --addr <fixture> --level 5000   # write one fixture, report what moved
 just upgrade            # uv lock --upgrade && uv sync
 just add <pkg>          # add a runtime dependency
 just add-dev <pkg>      # add a dev dependency

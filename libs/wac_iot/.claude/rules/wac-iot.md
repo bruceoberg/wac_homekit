@@ -123,10 +123,29 @@ inbound TCP on its own port too.
 Measured on an RGBW fixture on the ColorScaping transformer. These are the
 only writes ever made to this hardware.
 
-- **Control works and partial writes are partial.** `status` alone, then
-  `red`/`green`/`blue` alone, each accepted with `result "0"`. Fields not
-  named in the body stayed exactly where they were — `level` held at 9981
-  and `mode` at 2 across both writes. Send only what is changing.
+- **Control works and partial writes are mostly partial.** `status` alone,
+  then `red`/`green`/`blue` alone, each accepted with `result "0"`, and
+  `level` held at 9981 across both. Send only what is changing — but see the
+  two exceptions below: `status` and `mode` both move on their own.
+- **Writing brightness or colour turns the fixture on.** Measured on a fixture
+  sitting at `status: false`: a lone `level` write and a lone RGB write each
+  came back with `status: true`, which neither request mentioned. Not an RGBW
+  quirk — a `level` write to the ELV zone does it too.
+  Colour *temperature* does not do this — `mixColorTemp` writes left an off
+  fixture off. So a consumer that dims or recolours a light it believes to be
+  off has just switched it on, and its own idea of on/off is now wrong until
+  the next poll.
+- **An explicit `status: false` loses to a colour write in the same request.**
+  `{red, green, blue, status: false}` sent to a fixture that was on left it
+  on — the colour write's implicit turn-on wins regardless of ordering in the
+  body. Turning a light off while also setting its colour takes two requests,
+  off last.
+- **The action 4 response carries the fixture's full new `state`.** Undocumented,
+  seen on both RGBW and ELV, and it agrees exactly with an immediate read —
+  including across a ramped turn-on on a fixture with `onRate: 200`, so it is
+  the settled target rather than an intermediate. Cheap to use as the
+  confirmation of a write instead of a second request, as long as it is read
+  as what the firmware *accepted*: an out-of-range value comes back clamped.
 - **RGB components are 0–255**, not the 0–10000 everything else uses. 255
   was accepted and stored verbatim, and the fixture's own full-blue state
   reports `blue: 255`.
@@ -172,7 +191,38 @@ library does not convert, and `ObjStateRgbw` enforces that the two views are
 never sent together. Round trip verified on hardware: Hue 120 → RGB (0,255,0)
 → device `hue 3333` → read back as 120°, exact.
 
-`mode` appears to be read-only in practice. Nothing has ever moved it.
+`mode` cannot be written directly — but it is not read-only. It moves as a
+*side effect* of which colour axis a request writes: an RGB write takes it to
+2 (Rgb), a `mixColorTemp` write takes it to 1 (TunableWhite). So the way to
+put a fixture into a colour mode is to write that mode's fields and let the
+firmware follow.
+
+Alongside it is an undocumented string field, **`colormode`**, which tracks
+the same thing in words — `"RGB"` and `"CCT"` observed, moving in lockstep
+with `mode` 2 and 1. It is the more readable of the two; neither is writable.
+
+##### Colour temperature works, and RGBW fixtures honor it
+
+Measured on an RGBW fixture (`915CS-CTR-WT`) that the WAC app had left in
+`colormode: "CCT"`. `mixColorTemp` had never been written to any fixture
+before this; it behaves far better than the HSV fields do.
+
+- **`mixColorTemp` is writable and exact.** 2700, 6500 and 4000 each accepted
+  with `result "0"` and stored verbatim.
+- **It moves nothing else** — not `level`, not the RGB triple, not `hue` or
+  `saturation`, and not `status`. The only accompanying change is `mode` /
+  `colormode` going to CCT when the fixture was in RGB.
+- **Out-of-range Kelvin is clamped, not refused.** 7000 on a 2700–6500
+  fixture came back `6500`, and 2000 came back `2700`, both with `result "0"`.
+  A consumer must therefore not read a zero result as "the value you sent is
+  the value it holds"; clamp against the fixture's own `minColorTemp` /
+  `maxColorTemp` and expect the firmware to clamp again anyway.
+- So an RGBW fixture genuinely has **two** colour axes it will honor — RGB and
+  Kelvin — mutually exclusive per request, which is what `ObjStateRgbw`
+  already enforces. Switching between them is just writing the other one.
+
+Still unmeasured: `colorTempLevel`, the stepped index. No fixture has been
+asked for it.
 
 #### Where brightness lives — partly measured, partly open
 
@@ -258,16 +308,17 @@ control was a real user toggle that never reached the hardware.
 
 ### Still unverified
 
-- Tunable white accepts `colorTempLevel` (steps 1–7) *or* `mixColorTemp`
-  (Kelvin), explicitly not both — document only, and no tunable white fixture
-  has been seen. The comparable RGBW rule *is* now measured; see above.
+- `colorTempLevel` (steps 1–7) has never been written. `mixColorTemp` now
+  has, on RGBW — see above — but no tunable white *fixture* has been seen at
+  all, so the document's rule that the two are mutually exclusive is still
+  document only.
 - No tunable white, fan, motorized trackhead, or wall-station *fixture* (type
   11) has been seen on real hardware yet. Those models are written from the
   document alone. Single color (0), RGBW (2), and ELV (6) have been seen.
 - Configure (action 6) is still unexercised. Of the action 4 fields,
-  `status`, `findme`, the RGB triple and `level` are now measured working;
-  `hue`, `saturation` and `mode` are measured *not* working (see above);
-  `mixColorTemp` has still never been written to any fixture.
+  `status`, `findme`, the RGB triple, `level` and `mixColorTemp` are now
+  measured working; `hue`, `saturation` and `mode` are measured *not*
+  writable (see above), though `mode` does move on its own.
 - **`findme` never appears in a fixture's read-back `state`.** It stayed
   absent before, during, and after the write above, so it looks write-only.
   Whether the fixture physically responded is unconfirmed: the fixture was

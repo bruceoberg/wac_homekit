@@ -10,6 +10,10 @@ run *args:
 dump *args:
     uv run wac_iot dump {{args}}
 
+# Write one fixture's control state, then report every field that moved
+set *args:
+    uv run wac_iot set {{args}}
+
 # Run tests
 test *args:
     uv run pytest {{args}}
