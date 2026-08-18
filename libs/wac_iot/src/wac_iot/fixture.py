@@ -79,6 +79,26 @@ class CFixtures:  # tag = fixs
 
 		return await self.trans.ObjAction(URI, self.ACTION.Control, addr=nAddr, state=objState)
 
+	@staticmethod
+	def ObjTryStateFromControl(obj: dict[str, Any]) -> dict[str, Any] | None:
+		"""The fixture's post-write state, if the control response carried one.
+
+		Undocumented, and measured on both RGBW and ELV fixtures: an action 4
+		response echoes the fixture's whole state after the write. It agrees
+		exactly with an immediate read, ramp times included, and it reports
+		what the firmware *accepted* — an out-of-range color temperature
+		comes back already clamped to the fixture's own bound.
+
+		That makes it the cheapest correction a consumer has. A write that
+		was silently adjusted, or that moved a field nobody asked for —
+		writing `level` also turns the fixture on — shows up here rather than
+		at the next poll.
+		"""
+
+		objState = obj.get("state")
+
+		return objState if isinstance(objState, dict) else None
+
 	async def ObjList(self) -> dict[str, Any]:
 		"""Action 5 — list fixture addresses."""
 

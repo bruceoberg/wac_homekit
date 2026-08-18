@@ -79,6 +79,12 @@ class CDevicePoll:  # tag = dpoll
 	async def Poll(self) -> None:
 		"""Read the whole device once and hand each fixture to its accessory."""
 
+		# Stamped before the read rather than after it. What an accessory needs
+		# to know is whether it was written while this data was in flight, and
+		# reading a whole transformer takes a second or more.
+
+		tPoll = asyncio.get_running_loop().time()
+
 		try:
 			snap = await self.client.SnapPoll()
 		except WacError as exc:
@@ -94,7 +100,7 @@ class CDevicePoll:  # tag = dpoll
 			return
 
 		for nAddr, facc in self.mpAddrFacc.items():
-			facc.Reconcile(snap.mpAddrFixtureKnown.get(nAddr))
+			facc.Reconcile(snap.mpAddrFixtureKnown.get(nAddr), tPoll=tPoll)
 
 
 class CBridge(Bridge):  # tag = bridge

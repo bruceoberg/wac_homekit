@@ -9,7 +9,7 @@ from __future__ import annotations  # Forward refs without quotes
 
 import pytest
 
-from wac_iot import FIXTUREK
+from wac_iot import FIXTUREK, CFixture
 
 from wac_homekit.accessory import (
 	AID_MAX,
@@ -18,6 +18,8 @@ from wac_homekit.accessory import (
 	NAidFromFixtureId,
 	StrTryFirmware,
 	TierTryFromFixturek,
+	g_mpFixturekTier,
+	g_mpTierClsState,
 )
 
 
@@ -108,3 +110,31 @@ def test_firmware_accepts_dotted_numbers(strVer: str) -> None:
 @pytest.mark.parametrize("strVer", [None, "", "v1.40", "1.40-beta", "1.2.3.4", "gnipacsroloC"])
 def test_firmware_rejects_anything_else(strVer: str | None) -> None:
 	assert StrTryFirmware(strVer) is None
+
+
+# ---------------------------------------------------------------------------
+# The state shape a tier validates control responses against
+# ---------------------------------------------------------------------------
+
+
+def test_every_tier_has_a_state_shape() -> None:
+	assert set(g_mpTierClsState) == set(LIGHTTIER)
+
+
+@pytest.mark.parametrize("fixturek,tier", sorted(g_mpFixturekTier.items()))
+def test_tier_shape_matches_what_a_poll_would_report(
+	fixturek: FIXTUREK,
+	tier: LIGHTTIER,
+) -> None:
+	"""The shape used for a control response must be the one a read produces.
+
+	A control response carries no `type`, so the accessory validates it
+	against the class its tier implies. If that ever disagreed with the class
+	`wac_iot` picks from the fixture's own type, a write would reconcile
+	through a different shape than the poll does — and the mismatch would be
+	invisible, because both are lenient about extra fields.
+	"""
+
+	fixture = CFixture({"type": int(fixturek), "state": {}})
+
+	assert type(fixture.state) is g_mpTierClsState[tier]

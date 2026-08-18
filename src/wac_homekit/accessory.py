@@ -14,6 +14,7 @@ what one poll saw and goes stale the moment the next one starts.
 
 from __future__ import annotations  # Forward refs without quotes
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -26,9 +27,12 @@ from pyhap.const import CATEGORY_LIGHTBULB
 
 from wac_iot import (
 	FIXTUREK,
+	LIGHTMODE,
 	CClient,
 	CFixture,
+	CFixtures,
 	SDetail,
+	SState,
 	SStateLight,
 	SStateRgbw,
 	SStateWhite,
@@ -102,6 +106,18 @@ def TierTryFromFixturek(fixturek: FIXTUREK) -> LIGHTTIER | None:
 	return g_mpFixturekTier.get(fixturek)
 
 
+# The state shape a tier's fixtures report. A poll gets its shape from the
+# fixture's own type, but the state echoed back by a control response carries
+# no type at all — and does not need to, because the accessory already knows
+# what it is talking to.
+
+g_mpTierClsState: dict[LIGHTTIER, type[SStateLight]] = {
+	LIGHTTIER.Dimmable: SStateLight,
+	LIGHTTIER.White:    SStateWhite,
+	LIGHTTIER.Rgbw:     SStateRgbw,
+}
+
+
 # AIDs must be stable across restarts — iOS remembers which accessory in a
 # bridge it paired with by AID, and a shuffle turns every light in the Home app
 # into a stranger. They must also be integers, while the only stable identifier
@@ -166,6 +182,25 @@ class CFixtureAccessory(Accessory):  # tag = facc
 		self.client = client
 		self.nAddr = nAddr
 		self.tier = tier
+		self.clsState = g_mpTierClsState[tier]
+
+		# A drag on a Home app slider is a burst of writes — a dozen in three
+		# seconds, measured — and one device request each would queue behind
+		# the last at ~1.4s apiece. The light and the tile would still be
+		# working through the burst long after the finger lifted.
+		#
+		# So a write records only *which* characteristics were touched. Their
+		# values are read at send time, straight off the characteristics,
+		# where HAP-python has already stored the newest. Latest wins, and a
+		# drag costs two or three requests instead of twelve.
+
+		self.setStrCharPending: set[str] = set()
+		self.taskControl: asyncio.Task[None] | None = None
+
+		# Loop time of the most recent write to this fixture, against which a
+		# poll's data is judged fresh or stale. See `_FIsPollStale`.
+
+		self.tControlLast = 0.0
 
 		# Reported by the last poll that saw this fixture. False also covers a
 		# poll that failed outright, which is how a whole unplugged
@@ -229,7 +264,10 @@ class CFixtureAccessory(Accessory):  # tag = facc
 			setter_callback=self._OnIdentify,
 		)
 
-		self.Reconcile(fixture)
+		# Straight to the state, not through `Reconcile`: this fixture was
+		# just read, and there is no write history for it to be stale against.
+
+		self.ReconcileState(fixture.state)
 
 	@property
 	def available(self) -> bool:
@@ -256,28 +294,48 @@ class CFixtureAccessory(Accessory):  # tag = facc
 
 		HAP-python has already stored the new values on the characteristics
 		by the time this runs, so the optimistic local update the user sees is
-		done and the only thing left is to tell the fixture. A failed write
-		therefore leaves HomeKit briefly ahead of the hardware; the next poll
-		reconciles it, which is the same correction path a change made from
-		the WAC app takes.
+		done. This only notes what was touched; the sending is the worker's
+		job, so a burst of writes collapses instead of queueing.
 		"""
 
-		self.driver.async_add_job(self._ControlAsync(mpStrValue))
+		self.setStrCharPending |= set(mpStrValue)
 
-	async def _ControlAsync(self, mpStrValue: dict[str, Any]) -> None:
-		"""Send exactly the fields that changed, in device units."""
+		if self.taskControl is None or self.taskControl.done():
+			self.taskControl = self.driver.async_add_job(self._ControlPendingAsync())
+
+	async def _ControlPendingAsync(self) -> None:
+		"""Send what is pending until nothing is, one request at a time.
+
+		Looping rather than sending once is the whole point: writes that
+		arrive while a request is in flight land in the same set and go out
+		together in the next one.
+		"""
+
+		while self.setStrCharPending:
+			setStrChar = self.setStrCharPending
+			self.setStrCharPending = set()
+
+			await self._ControlAsync(setStrChar)
+
+	async def _ControlAsync(self, setStrChar: set[str]) -> None:
+		"""Send the named characteristics at their current values, in device units.
+
+		Values come off the characteristics rather than out of the batch that
+		named them, because by the time this runs several batches may have
+		been folded together and only the newest value is wanted.
+		"""
 
 		fOn: bool | None = None
-		if CHAR_ON in mpStrValue:
-			fOn = bool(mpStrValue[CHAR_ON])
+		if CHAR_ON in setStrChar:
+			fOn = bool(self.charOn.value)
 
 		nLevel: int | None = None
-		if CHAR_BRIGHTNESS in mpStrValue:
-			nLevel = NLevelFromBrightness(int(mpStrValue[CHAR_BRIGHTNESS]))
+		if CHAR_BRIGHTNESS in setStrChar:
+			nLevel = NLevelFromBrightness(int(self.charBrightness.value))
 
 		nColorTemp: int | None = None
-		if CHAR_COLOR_TEMPERATURE in mpStrValue:
-			nColorTemp = self.ctrange.NKelvinFromMired(int(mpStrValue[CHAR_COLOR_TEMPERATURE]))
+		if CHAR_COLOR_TEMPERATURE in setStrChar and self.charColorTemp is not None:
+			nColorTemp = self.ctrange.NKelvinFromMired(int(self.charColorTemp.value))
 
 		# Colour is written as RGB, never as hue/saturation — the firmware
 		# refuses or silently discards HSV writes. See TplRgbFromHueSat.
@@ -288,7 +346,7 @@ class CFixtureAccessory(Accessory):  # tag = facc
 		# intended combination rather than a half-applied one.
 
 		tplRgb: tuple[int, int, int] | None = None
-		fColorSet = CHAR_HUE in mpStrValue or CHAR_SATURATION in mpStrValue
+		fColorSet = CHAR_HUE in setStrChar or CHAR_SATURATION in setStrChar
 
 		if fColorSet and self.charHue is not None and self.charSaturation is not None:
 			tplRgb = TplRgbFromHueSat(
@@ -301,21 +359,23 @@ class CFixtureAccessory(Accessory):  # tag = facc
 		# builders in wac_iot would refuse an empty state anyway.
 
 		if all(obj is None for obj in (fOn, nLevel, nColorTemp, tplRgb)):
-			g_log.debug("%s: nothing to control in %s", self.display_name, sorted(mpStrValue))
+			g_log.debug("%s: nothing to control in %s", self.display_name, sorted(setStrChar))
 
 			return
+
+		objControl: dict[str, Any] | None = None
 
 		try:
 			match self.tier:
 				case LIGHTTIER.Dimmable:
-					await self.client.fixture.ControlLight(
+					objControl = await self.client.fixture.ControlLight(
 						self.nAddr,
 						fOn=fOn,
 						nLevel=nLevel,
 					)
 
 				case LIGHTTIER.White:
-					await self.client.fixture.ControlWhite(
+					objControl = await self.client.fixture.ControlWhite(
 						self.nAddr,
 						fOn=fOn,
 						nLevel=nLevel,
@@ -323,14 +383,14 @@ class CFixtureAccessory(Accessory):  # tag = facc
 					)
 
 				case LIGHTTIER.Rgbw:
-					# BB(bruce) an RGBW fixture also reports a colour
-					# temperature range, so HomeKit's white point could be
-					# driven through mixColorTemp. That path has never been
-					# written to real hardware and RGB and mixColorTemp are
-					# mutually exclusive on the wire, so this phase offers
-					# Hue/Saturation only and leaves the white point alone.
+					# BB(bruce) an RGBW fixture will also honor mixColorTemp
+					# — measured — so HomeKit's white point could be driven
+					# through it. Offering both axes means picking one per
+					# write, since they are mutually exclusive on the wire and
+					# each drags `mode` along behind it. That is a phase of
+					# its own; this one offers Hue/Saturation.
 
-					await self.client.fixture.ControlRgbw(
+					objControl = await self.client.fixture.ControlRgbw(
 						self.nAddr,
 						fOn=fOn,
 						nLevel=nLevel,
@@ -339,6 +399,20 @@ class CFixtureAccessory(Accessory):  # tag = facc
 
 		except WacError as exc:
 			g_log.error("%s: control failed: %s", self.display_name, exc)
+
+		# Stamped even when the write failed, because a request that timed out
+		# may still have reached the fixture — a poll read before it is no
+		# more trustworthy than one read before a success.
+
+		self.tControlLast = asyncio.get_running_loop().time()
+
+		# A response describes the request it answered, which more input has
+		# already overtaken. Folding it back would push a value the user has
+		# dragged past — the slider marching back through where it has been.
+		# The write that drains the rest is the one that gets to reconcile.
+
+		if objControl is not None and not self.setStrCharPending:
+			self._ReconcileControl(objControl)
 
 	def _OnIdentify(self, objValue: Any) -> None:
 		"""HomeKit Identify, which is the device's `findme`.
@@ -360,20 +434,81 @@ class CFixtureAccessory(Accessory):  # tag = facc
 	# Device → HomeKit
 	# -----------------------------------------------------------------------
 
-	def Reconcile(self, fixture: CFixture | None) -> None:
+	def _ReconcileControl(self, objControl: dict[str, Any]) -> None:
+		"""Fold a write's own response back in, rather than waiting for a poll.
+
+		Action 4 echoes the fixture's whole post-write state, so what the
+		firmware actually did lands in HomeKit as the write completes. That
+		matters because the firmware routinely does something other than what
+		was asked: writing `level` or a colour also switches the fixture on,
+		and an out-of-range colour temperature comes back clamped. Without
+		this the Home app shows the requested value, and the wrong one, until
+		the next poll.
+
+		The poll remains the correction for everything else — changes made
+		from a wall station or the WAC app, and writes that failed outright,
+		which never get here.
+		"""
+
+		objState = CFixtures.ObjTryStateFromControl(objControl)
+
+		if objState is None:
+			# Not seen on real firmware, but a response without a state is
+			# well-formed enough for `ObjAction` to have accepted it, and
+			# there is nothing to fold in.
+
+			return
+
+		self.ReconcileState(self.clsState.model_validate(objState))
+
+	def _FIsPollStale(self, tPoll: float) -> bool:
+		"""Whether a poll's data predates what HomeKit has already been told.
+
+		A read that started before the newest local write describes the
+		fixture as it was *before* that write, so folding it in shoves the
+		Home app back to the value the user just moved away from. Measured:
+		a tap at 30%, another at 100% six seconds later, and the slider
+		snapping back to 30 forty milliseconds after the second tap — far too
+		quick to be a device round trip, because it was the poll.
+
+		A write still in flight counts as newer than any poll, since the read
+		cannot have seen it yet.
+		"""
+
+		if self.taskControl is not None and not self.taskControl.done():
+			return True
+
+		return self.tControlLast > tPoll
+
+	def Reconcile(self, fixture: CFixture | None, *, tPoll: float) -> None:
 		"""Fold a fresh poll's view of this fixture back into HomeKit.
+
+		`tPoll` is the loop time the read began, which is what decides whether
+		this view is still current — see `_FIsPollStale`.
 
 		`None` means this poll did not see the fixture at all, which is not
 		the same as seeing it report itself offline — but it looks identical
 		from the Home app, so both land on unavailable.
 		"""
 
+		if self._FIsPollStale(tPoll):
+			g_log.debug("%s: poll predates the last write, dropping", self.display_name)
+
+			return
+
 		if fixture is None:
 			self.MarkOffline()
 
 			return
 
-		state = fixture.state
+		self.ReconcileState(fixture.state)
+
+	def ReconcileState(self, state: SState) -> None:
+		"""Fold one reading of this fixture's state into HomeKit.
+
+		Shared by the poll and by the state a control response echoes back —
+		the same thing arriving by two routes.
+		"""
 
 		if not isinstance(state, SStateLight):
 			# The fixture at this address answered with a shape that is not a
@@ -397,15 +532,27 @@ class CFixtureAccessory(Accessory):  # tag = facc
 				self._SetCharTry(self.charColorTemp, self.ctrange.NMiredFromKelvin(state.mixColorTemp))
 
 		if isinstance(state, SStateRgbw):
-			# Never treat a falsy hue as "no colour reported" — fully
-			# saturated red reports hue 0, and only saturation tells it apart
-			# from white.
+			if state.mode is LIGHTMODE.TunableWhite:
+				# The fixture is showing its white point, and the hue and
+				# saturation it still reports are leftovers from the last
+				# colour it held. Reporting them paints the Home app tile deep
+				# blue for a light that is plainly white, so report white
+				# instead and leave the stale hue alone behind it.
+				#
+				# `colormode` says the same thing in words ("CCT" / "RGB").
 
-			if state.hue is not None:
-				self._SetCharTry(self.charHue, NDegFromHue(state.hue))
+				self._SetCharTry(self.charSaturation, 0)
 
-			if state.saturation is not None:
-				self._SetCharTry(self.charSaturation, NPctFromSaturation(state.saturation))
+			else:
+				# Never treat a falsy hue as "no colour reported" — fully
+				# saturated red reports hue 0, and only saturation tells it
+				# apart from white.
+
+				if state.hue is not None:
+					self._SetCharTry(self.charHue, NDegFromHue(state.hue))
+
+				if state.saturation is not None:
+					self._SetCharTry(self.charSaturation, NPctFromSaturation(state.saturation))
 
 	def MarkOffline(self) -> None:
 		"""Report this fixture as unreachable without touching its values."""

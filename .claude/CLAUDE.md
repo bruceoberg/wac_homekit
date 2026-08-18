@@ -114,8 +114,43 @@ pseudo-fixture. What the live run established:
   fixtures were idle, so the "only notify if the value moved" guard holds.
 - Clean SIGTERM shutdown, exit 0.
 
-Still unexercised on hardware: pairing from a real Home app, ColorTemperature
-(no tunable-white fixture exists here), and Identify.
+Pairing from a real Home app is done: the bridge appears in Home with its
+three accessories, and they persist across a bridge restart — which is the
+`NAidFromFixtureId` stability claim above holding in practice, not just in
+tests.
+
+Still unexercised: Identify with someone watching the fixture, and the
+ColorTemperature characteristic itself. The *device* side of colour
+temperature is now measured — see the device-layer notes — so what is left
+untested is the mired conversion and the slider, not the wire.
+
+### What the device does that the bridge has to answer for
+
+Measured after the bridge was written, so these are open against the current
+code rather than settled by it:
+
+- **Writing brightness or colour turns the fixture on.** A lone `level` or
+  RGB write to a fixture at `status: false` comes back `status: true`,
+  measured on both RGBW and ELV. *Handled*, and handled by following the
+  device rather than fighting it — the control response says `status: true`
+  and `_ReconcileControl` folds that straight into the On characteristic.
+  The rejected alternative was attaching HomeKit's current On value to every
+  write, which would have let a stale belief turn off a light someone had
+  just switched on at the wall.
+- **An explicit off loses to a colour write in the same request.** `{rgb...,
+  status: false}` left the light on. `_ControlAsync` builds exactly that body
+  when a batch carries On alongside Hue/Saturation, so turning a light off
+  from a scene that also sets its colour does not turn it off. **Still open.**
+  The fix is two requests with off last, which costs a second round trip on
+  every batch that carries On — worth doing only once the Home app is
+  observed sending that combination. The tile is at least honest in the
+  meantime, since the echoed state reports the light as on.
+- **`mixColorTemp` works on RGBW fixtures and does *not* turn them on.** That
+  answers the `BB(bruce)` in `accessory.py`: the white point is drivable, so
+  an RGBW fixture could carry ColorTemperature alongside Hue/Saturation. The
+  firmware treats them as mutually exclusive per request and flips `mode` to
+  follow whichever was written, so the bridge would have to pick one axis per
+  write — which is what the Home app does anyway. Still open.
 
 ### What HAP-python actually requires
 
@@ -137,9 +172,11 @@ Still unexercised on hardware: pairing from a real Home app, ColorTemperature
   is right to treat as conflicting.
 - **HAP-python has already done the optimistic update** by the time either
   setter runs: `client_update_value` stores the value and notifies first.
-  There is nothing to set optimistically. A failed device write therefore
-  leaves HomeKit briefly ahead of the hardware, and the next poll corrects it
-  — the same path a change made from the WAC app takes.
+  There is nothing to set optimistically. What corrects it is the action 4
+  response, which echoes the fixture's whole post-write state — see
+  `_ReconcileControl`. Only a write that never reached the device at all is
+  left for the poll, along with changes made from a wall station or the WAC
+  app.
 - **`Accessory.run_at_interval` takes a literal**, so a configurable interval
   means applying the decorator at call time rather than at class definition:
   `await Accessory.run_at_interval(dT)(CBridge._PollAll)(self)`. Worth keeping
