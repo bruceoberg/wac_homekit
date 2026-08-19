@@ -75,9 +75,10 @@ The two facts from it most likely to bite on the HomeKit side:
   is either refused outright or, after a `mode` write has been attempted,
   accepted and silently discarded. There is no combination of HSV fields this
   firmware honors, which is the whole reason `TplRgbFromHueSat` exists.
-- **Whether RGB magnitude drives light output is still unmeasured.** So the
-  brightness axis has one settled field (`level`) and one open question. See
-  the decision below.
+- **`level` is the brightness axis; RGB magnitude barely renders at all.**
+  Measured after dark against a side-by-side control. So brightness has one
+  field and the triple is chromaticity, which is what the bridge already
+  assumed.
 
 ## The HomeKit side
 
@@ -89,6 +90,17 @@ fixture type to `g_mpFixturekTier` is the whole change needed to bridge it.
 `findme` in a fixture's control state maps onto HomeKit's Identify
 characteristic. It is write-only — it never appears in a read-back `state` —
 so nothing may confirm an Identify by reading it back.
+
+Measured end to end, driven from Eve: `findme` flashes the fixture one second
+on, one second off, for 30 blinks — about a minute — then stops by itself,
+leaving the stored state untouched. **The Home app gives no way to press it**,
+though: iOS surfaces Identify during the add-accessory flow and, for
+accessories behind a bridge, not afterwards. Deleting and re-pairing to hunt
+for the button is not worth it — it would cost every room assignment, name,
+scene and automation, and probably would not produce a persistent button
+anyway. Use Eve or another third-party client. HAP-python has no Identify
+dispatch of its own, so the `configure_char` setter is the only route, and it
+runs through the same `client_update_value` path as every other write.
 
 ### Verified on hardware
 
@@ -123,8 +135,13 @@ fixture, which does not exist on this transformer: the Home app's temperature
 control drives `mixColorTemp` and produces a white the colour wheel cannot.
 Switching back and forth between the colour and temperature tabs behaves.
 
-Still unexercised: Identify with someone watching the fixture, and any
-genuinely tunable-white fixture.
+Identify works from a real controller — Eve, since the Home app offers no
+button for a bridged accessory. That covers the last write path: every
+characteristic this bridge offers has now been driven from a HomeKit
+controller against real hardware.
+
+Still unexercised: any genuinely tunable-white fixture, there being none on
+this transformer.
 
 ### What the device does that the bridge has to answer for
 
@@ -212,12 +229,11 @@ code rather than settled by it:
   appears.
 - **The RGB triple carries chromaticity only; `level` carries brightness.**
   `TplRgbFromHueSat` pins value at full, so half-saturated red is
-  `(255, 128, 128)`, never a dimmed `(128, 0, 0)`. Whether RGB magnitude
-  actually drives light output is still unmeasured — see the device-layer
-  notes — and this is the choice that stays correct under either answer: if
-  magnitude is cosmetic it is obviously right, and if magnitude does drive
-  output it still keeps the two axes from fighting. Revisit it only once the
-  dark test lands.
+  `(255, 128, 128)`, never a dimmed `(128, 0, 0)`. This was a hedge against
+  an unmeasured question; the dark test has since settled it in the choice's
+  favour — a 4× cut in RGB magnitude is barely visible and a further 4× is
+  invisible, while the same ratio on `level` is obvious. See the device-layer
+  notes. Nothing to revisit.
 - **An RGBW fixture needs a white point, not just a colour wheel.** The RGB
   triple drives its colour channels and never its white LED — measured, and
   the reason a HomeKit "white" came out visibly blue: the Home app's white
@@ -225,6 +241,14 @@ code rather than settled by it:
   blue RGB, and three coloured LEDs mixed to white are cool before that tint
   is added. So RGBW carries ColorTemperature as well as Hue/Saturation, and
   the two displace each other rather than racing.
+- **Only the colour axis the fixture is rendering gets reported.** HomeKit
+  treats ColorTemperature and Hue/Saturation as two views of one state, so
+  publishing both at once is a contradiction and the Home app renders the
+  blend — a saturated red plus a 5208K white point painted the tile
+  flesh-coloured for a plainly red light. `mode` says which axis is live; the
+  other keeps whatever it last held, which is where the user would resume on
+  that tab. Do not "fix" a stale-looking ColorTemperature by reporting it
+  unconditionally.
 - **A colour the fixture got from us is not re-derived from it.** RGB is
   8 bits per channel and hue is recomputed from it, so a round trip loses
   several degrees at low saturation — HomeKit asked for 251°, the fixture
@@ -239,9 +263,12 @@ code rather than settled by it:
   2700–6500K is the documented fallback; widen it only by reading a real
   fixture's `detail`.
 - **Poll interval defaults to 5s**, the responsive end of the range these
-  transformers tolerate. It is also the upper bound on how long a
-  wall-station press stays invisible to HomeKit, since there is no push
-  channel.
+  transformers tolerate. It is *not* what decides how quickly a change made
+  through a group — a wall-station scene, or any scene at all — reaches
+  HomeKit: the transformer reports group writes into its per-fixture state
+  tens of seconds late, and polling faster does nothing about it. See the
+  device-layer notes. Choose this interval for how hard it leans on the
+  hardware, not for a responsiveness it cannot buy.
 - A failed poll marks every accessory on that device unavailable rather than
   leaving stale values on show, so an unplugged transformer reads as "No
   Response" in the Home app.

@@ -201,9 +201,25 @@ never sent together. Round trip verified on hardware: Hue 120 → RGB (0,255,0)
 put a fixture into a colour mode is to write that mode's fields and let the
 firmware follow.
 
-Alongside it is an undocumented string field, **`colormode`**, which tracks
-the same thing in words — `"RGB"` and `"CCT"` observed, moving in lockstep
-with `mode` 2 and 1. It is the more readable of the two; neither is writable.
+Alongside it is an undocumented string field, **`colormode`**, with `"RGB"`
+and `"CCT"` observed. It is *not* a rendering of `mode`, though it looks like
+one until a third value turns up: `colormode` names the colour family, while
+`mode` distinguishes representations within it.
+
+| colormode | mode | meaning |
+|---|---|---|
+| `CCT` | 1 (TunableWhite) | the white point drives output |
+| `RGB` | 2 (Rgb) | the triple carries the colour |
+| `RGB` | 3 (Hsv) | hue/saturation carry it, `level` separate |
+
+A fixture in mode 2 moves to mode 3 when `level` is written — measured, and
+consistent with what the brightness section below concludes: mode 3 is the
+representation where brightness is separable from chroma, so asking for a
+level pushes the firmware into it. Neither field is writable.
+
+**Test for CCT, not for RGB.** The chromatic family has at least two `mode`
+values and may gain more, so a consumer wanting "is this fixture showing
+white" should ask `mode == 1` and treat everything else as colour.
 
 ##### Colour temperature works, and RGBW fixtures honor it
 
@@ -245,23 +261,26 @@ else. What that establishes on the wire:
   desaturated white both report it; only `saturation` separates them. Never
   treat a falsy hue as "no colour reported".
 
-**Open: whether RGB magnitude actually changes light output.** Every
-brightness reading so far was taken in daylight, where neither the app's
-own "red" / "dark red" presets nor our 128 → 255 write produced a
-discernible difference. So `red: 128` may mean half output, or may be a
-stored value the fixture does not render. Until that is settled in darkness,
-do not build brightness conversion on either assumption.
+**Settled: `level` is the brightness axis, and RGB magnitude very nearly is
+not.** Measured after dark, two RGBW fixtures side by side at identical
+`level`, one held at `red: 255` as the control:
 
-The two answers lead to different consumers. If magnitude does drive output,
-apparent brightness is a product of `level` and RGB magnitude, reading
-`level` alone would report 99.8% on a half-lit fixture, and writing
-brightness has two mechanisms that need to be chosen between. If it does
-not, `level` alone is the brightness field and the magnitude is cosmetic.
-Test in the dark: set `red: 255`, then `red: 64`, with `level` untouched.
+| change | ratio | seen |
+|---|---|---|
+| `red` 255 → 64 | 4× | slightly dimmer |
+| `red` 64 → 16 | 4× | no observable change |
+| `level` 9981 → 2500 | 4× | obviously dimmer |
 
-**This library reports both axes and converts neither** — the choice of where
-brightness comes from is the consumer's, and it is a choice that has to be
-made before the dark test lands.
+The last row is the control that makes the other two mean something: the same
+4× ratio on `level` is unmistakable, so the null result on magnitude is the
+hardware, not the observer. Magnitude has a small effect near the top of the
+range and none below it — nothing like proportional.
+
+So apparent brightness is `level`, and a consumer should carry chromaticity
+in the triple and brightness in `level` rather than trying to split
+brightness across both. Note this is a statement about *rendering*: the
+firmware still stores the magnitude faithfully and reports it back, so a
+consumer reading `red: 64` must not infer a quarter-lit fixture.
 
 Colour *hue* readings are not in doubt — cyan, red and green were each set
 from the app and read back correctly, and a blue-to-white change was
@@ -323,12 +342,20 @@ control was a real user toggle that never reached the hardware.
   `status`, `findme`, the RGB triple, `level` and `mixColorTemp` are now
   measured working; `hue`, `saturation` and `mode` are measured *not*
   writable (see above), though `mode` does move on its own.
-- **`findme` never appears in a fixture's read-back `state`.** It stayed
-  absent before, during, and after the write above, so it looks write-only.
-  Whether the fixture physically responded is unconfirmed: the fixture was
-  off at the time and nobody was watching it. Do not treat a missing
-  `findme` as evidence that the write failed, and do not build anything that
-  reads it back.
+- **`findme` works, and never appears in a fixture's read-back `state`.**
+  Confirmed by eye on an RGBW fixture that was on and being watched: the
+  write is accepted with `result "0"`, and the fixture flashes one second on,
+  one second off, for **30 blinks — about a minute — then stops by itself**.
+  It leaves the stored state exactly as it was: the fixture returns to the
+  colour and level it held, and no field moves at any point.
+
+  The field itself stayed absent before, during and after, in both the
+  echoed state and a read-back, so it is genuinely write-only. Do not treat
+  a missing `findme` as evidence that the write failed, do not build
+  anything that reads it back, and do not expect to observe the flashing
+  through this interface — only a person in the room can confirm it.
+
+  Whether `findme: false` cancels an in-progress flash is untested.
 
 ## Protocol facts that shape the design
 
@@ -371,10 +398,39 @@ control was a real user toggle that never reached the hardware.
   REST. **Do not plan on reading wall-station buttons through this
   interface** — treat each device as its own independent REST endpoint,
   grouped by `locationId`.
+
+  That multicast hop is wall-station *to transformer*, and no further: a
+  button runs an automation stored on the transformer, which writes a group.
+  Fixtures have no address of their own on the network and are never reached
+  directly. Confirmed by the owner of this installation, and consistent with
+  the six group-writing automations the transformer lists. A press is
+  therefore a group write by another name — see the lag it comes with,
+  above.
 - The transformer is the only device worth polling for light state. Address it
   directly; do not try to reach its fixtures through a wall station.
 - There is no push channel. Polling is the only option; 5–10 seconds is the
   starting range for these ESP32-class devices.
+- **A group write reaches the fixtures promptly, but `/fixture` reports it
+  tens of seconds late, per fixture.** Measured at 1 Hz against group 255:
+  the write returns `result "0"` at once and the lights change within about a
+  second, while the per-fixture `status` read back through action 3 moved
+  after ~8s for one fixture and ~56s for the other. Two fixtures switched by
+  one request, their reported states nearly a minute apart.
+
+  **This is about group writes, not about who made them.** It was first seen
+  after a wall-station press and looked like a wall-station problem; issuing
+  the identical group write over REST reproduces it exactly. Per-fixture
+  writes have no such lag — action 4 on one fixture reads back immediately
+  and exactly, which is what makes the contrast meaningful.
+
+  Wall stations matter only because every scene on this transformer writes
+  group 255, so a button press is a group write by another name.
+
+  Consequences for a consumer: **polling faster buys nothing** for a change
+  made through a group, so do not present a poll interval as the latency a
+  user will see, and do not shorten it hoping to improve that. Reading
+  `/group` state instead of per-fixture state might be fresher — unmeasured,
+  and the obvious next experiment if this ever matters.
 - Group address 255 is a built-in "All-Default" group. It holds every *real*
   fixture, but not the type-4 pseudo-fixture above — do not treat its
   membership as equivalent to the action 5 address list.
