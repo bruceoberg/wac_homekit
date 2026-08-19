@@ -571,20 +571,36 @@ class CFixtureAccessory(Accessory):  # tag = facc
 		if state.level is not None:
 			self._SetCharTry(self.charBrightness, NBrightnessFromLevel(state.level))
 
-		if self.charColorTemp is not None and isinstance(state, (SStateWhite, SStateRgbw)):
-			if state.mixColorTemp is not None:
-				self._SetCharTry(self.charColorTemp, self.ctrange.NMiredFromKelvin(state.mixColorTemp))
+		# A tunable white fixture has only the one colour axis, so its white
+		# point is always the truth.
+
+		if isinstance(state, SStateWhite):
+			self._SetCharTryColorTemp(state.mixColorTemp)
 
 		if isinstance(state, SStateRgbw):
-			if state.mode is LIGHTMODE.TunableWhite:
-				# The fixture is showing its white point, and the hue and
-				# saturation it still reports are leftovers from the last
-				# colour it held. Reporting them paints the Home app tile deep
-				# blue for a light that is plainly white, so report white
-				# instead and leave the stale hue alone behind it.
-				#
-				# `colormode` says the same thing in words ("CCT" / "RGB").
+			# An RGBW fixture has two, and HomeKit treats ColorTemperature and
+			# Hue/Saturation as two views of one state rather than as
+			# independent controls. Reporting both at once is a contradiction,
+			# and the Home app renders the blend — a fully saturated red plus
+			# a 5208K white point painted the tile flesh-coloured for a light
+			# that was plainly red.
+			#
+			# So only the axis the fixture is actually rendering gets
+			# reported, and `mode` is what says which. The other is left
+			# holding whatever it last had, which is also what the user would
+			# return to on that tab.
 
+			if state.mode is LIGHTMODE.TunableWhite:
+				# Showing its white point. The hue and saturation it still
+				# reports are leftovers from the last colour it held, and
+				# reporting them paints the tile that colour for a white
+				# light, so say white and leave the stale hue behind it.
+				#
+				# `colormode` says the same thing in words ("CCT" / "RGB"),
+				# but the test is deliberately "is it CCT" rather than "is it
+				# RGB": the chromatic family has more than one `mode` value.
+
+				self._SetCharTryColorTemp(state.mixColorTemp)
 				self._SetCharTry(self.charSaturation, 0)
 
 			elif not self._FIsRgbOurs(state):
@@ -597,6 +613,14 @@ class CFixtureAccessory(Accessory):  # tag = facc
 
 				if state.saturation is not None:
 					self._SetCharTry(self.charSaturation, NPctFromSaturation(state.saturation))
+
+	def _SetCharTryColorTemp(self, nKelvin: int | None) -> None:
+		"""Report a white point, in the mireds HomeKit wants."""
+
+		if self.charColorTemp is None or nKelvin is None:
+			return
+
+		self._SetCharTry(self.charColorTemp, self.ctrange.NMiredFromKelvin(nKelvin))
 
 	def MarkOffline(self) -> None:
 		"""Report this fixture as unreachable without touching its values."""
