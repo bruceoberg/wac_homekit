@@ -202,6 +202,11 @@ class CFixtureAccessory(Accessory):  # tag = facc
 
 		self.tControlLast = 0.0
 
+		# The last RGB triple this bridge sent, if the fixture still holds it.
+		# See `_FIsRgbOurs`.
+
+		self.tplRgbLast: tuple[int, int, int] | None = None
+
 		# Reported by the last poll that saw this fixture. False also covers a
 		# poll that failed outright, which is how a whole unplugged
 		# transformer shows up in the Home app as "No Response".
@@ -213,13 +218,18 @@ class CFixtureAccessory(Accessory):  # tag = facc
 		# Only the characteristics this tier can honor. A ColorTemperature on
 		# a single-color fixture would be a control that silently does
 		# nothing, which is worse than not offering it.
+		#
+		# An RGBW fixture gets one anyway, because the RGB triple drives its
+		# colour channels only and never its white LED — measured, and the
+		# reason a HomeKit "white" comes out visibly blue. Without a white
+		# point there is no way to ask this hardware for a real white.
 
 		lStrChar = [CHAR_BRIGHTNESS]
 
 		if tier is LIGHTTIER.White:
 			lStrChar.append(CHAR_COLOR_TEMPERATURE)
 		elif tier is LIGHTTIER.Rgbw:
-			lStrChar += [CHAR_HUE, CHAR_SATURATION]
+			lStrChar += [CHAR_COLOR_TEMPERATURE, CHAR_HUE, CHAR_SATURATION]
 
 		self.servLight = self.add_preload_service(SERV_LIGHTBULB, chars=lStrChar)
 
@@ -237,7 +247,7 @@ class CFixtureAccessory(Accessory):  # tag = facc
 
 		self.charColorTemp = (
 			self.servLight.get_characteristic(CHAR_COLOR_TEMPERATURE)
-			if tier is LIGHTTIER.White else None
+			if tier is not LIGHTTIER.Dimmable else None
 		)
 		self.charHue = (
 			self.servLight.get_characteristic(CHAR_HUE)
@@ -298,7 +308,20 @@ class CFixtureAccessory(Accessory):  # tag = facc
 		job, so a burst of writes collapses instead of queueing.
 		"""
 
-		self.setStrCharPending |= set(mpStrValue)
+		setStrChar = set(mpStrValue)
+
+		# RGB and the white point are two views of one colour state on the
+		# wire, and the device refuses a request carrying both. The pending
+		# set must not accumulate both either — so the newer of the two
+		# displaces the older, which is exactly what switching between the
+		# Home app's colour and temperature tabs means.
+
+		if CHAR_COLOR_TEMPERATURE in setStrChar:
+			self.setStrCharPending -= {CHAR_HUE, CHAR_SATURATION}
+		elif setStrChar & {CHAR_HUE, CHAR_SATURATION}:
+			self.setStrCharPending -= {CHAR_COLOR_TEMPERATURE}
+
+		self.setStrCharPending |= setStrChar
 
 		if self.taskControl is None or self.taskControl.done():
 			self.taskControl = self.driver.async_add_job(self._ControlPendingAsync())
@@ -383,18 +406,17 @@ class CFixtureAccessory(Accessory):  # tag = facc
 					)
 
 				case LIGHTTIER.Rgbw:
-					# BB(bruce) an RGBW fixture will also honor mixColorTemp
-					# — measured — so HomeKit's white point could be driven
-					# through it. Offering both axes means picking one per
-					# write, since they are mutually exclusive on the wire and
-					# each drags `mode` along behind it. That is a phase of
-					# its own; this one offers Hue/Saturation.
+					# Only one of the two colour axes is ever set here — see
+					# the pending-set handling in `_OnSetService` — because
+					# the builder refuses both, and rightly: each one drags
+					# the fixture's `mode` along behind it.
 
 					objControl = await self.client.fixture.ControlRgbw(
 						self.nAddr,
 						fOn=fOn,
 						nLevel=nLevel,
 						tplRgb=tplRgb,
+						nColorTemp=nColorTemp,
 					)
 
 		except WacError as exc:
@@ -405,6 +427,9 @@ class CFixtureAccessory(Accessory):  # tag = facc
 		# more trustworthy than one read before a success.
 
 		self.tControlLast = asyncio.get_running_loop().time()
+
+		if objControl is not None and tplRgb is not None:
+			self.tplRgbLast = tplRgb
 
 		# A response describes the request it answered, which more input has
 		# already overtaken. Folding it back would push a value the user has
@@ -480,6 +505,25 @@ class CFixtureAccessory(Accessory):  # tag = facc
 
 		return self.tControlLast > tPoll
 
+	def _FIsRgbOurs(self, state: SStateRgbw) -> bool:
+		"""Whether the fixture is holding exactly the colour this bridge sent.
+
+		When it is, the hue and saturation it reports are our own values
+		round-tripped through an 8-bit triple and back, and the trip is lossy
+		— worst at low saturation, where the triple spans a dozen levels out
+		of 255. Measured: HomeKit asked for hue 251, the fixture recomputed
+		253.8, and the user's chosen swatch moved under them a second later.
+
+		While the device agrees with us, what the user picked is the better
+		record of it. A colour set anywhere else — the wall, the WAC app —
+		fails this test and reconciles normally.
+		"""
+
+		if self.tplRgbLast is None:
+			return False
+
+		return (state.red, state.green, state.blue) == self.tplRgbLast
+
 	def Reconcile(self, fixture: CFixture | None, *, tPoll: float) -> None:
 		"""Fold a fresh poll's view of this fixture back into HomeKit.
 
@@ -527,7 +571,7 @@ class CFixtureAccessory(Accessory):  # tag = facc
 		if state.level is not None:
 			self._SetCharTry(self.charBrightness, NBrightnessFromLevel(state.level))
 
-		if self.charColorTemp is not None and isinstance(state, SStateWhite):
+		if self.charColorTemp is not None and isinstance(state, (SStateWhite, SStateRgbw)):
 			if state.mixColorTemp is not None:
 				self._SetCharTry(self.charColorTemp, self.ctrange.NMiredFromKelvin(state.mixColorTemp))
 
@@ -543,7 +587,7 @@ class CFixtureAccessory(Accessory):  # tag = facc
 
 				self._SetCharTry(self.charSaturation, 0)
 
-			else:
+			elif not self._FIsRgbOurs(state):
 				# Never treat a falsy hue as "no colour reported" — fully
 				# saturated red reports hue 0, and only saturation tells it
 				# apart from white.

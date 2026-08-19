@@ -154,10 +154,14 @@ only writes ever made to this hardware.
   `saturation` 10000 → 0, which nothing in the request mentioned. So the
   firmware derives one from the other, and sending both in a single request
   really would be two conflicting writes. `ObjStateRgbw` refuses that.
-- **RGB (255,255,255) produces visible white** on an RGBW fixture, confirmed
-  by eye. The firmware agrees, reporting `saturation: 0` afterwards. Whether
-  this lights a dedicated white LED or just all three colour channels is
-  unknown — the `mixColorTemp` path has never been written.
+- **The RGB triple does not reach the white LED.** RGB (255,255,255) is
+  accepted, and the firmware agrees it is neutral — `saturation: 0`,
+  `hue: 0` — but by eye the fixture is visibly blue-tinted, the way three
+  coloured LEDs mixed to "white" always are. So the triple drives the colour
+  channels only. **The fixture's real white is `mixColorTemp`**, and a
+  consumer offering only an RGB colour wheel cannot produce a white on this
+  hardware at all. Earlier notes called this white "confirmed by eye"; that
+  was daylight and a comparison against nothing.
 - **`level` is writable and exact.** 50% → `level: 5000`, 100% →
   `level: 10000`, each accepted and stored verbatim with the colour fields
   untouched. Note a fixture idling at 9981 reads as 100% and gets snapped to

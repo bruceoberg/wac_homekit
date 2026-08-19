@@ -98,9 +98,8 @@ pseudo-fixture. What the live run established:
 
 - Discovery, accessory construction, tier selection and characteristic sets
   are all correct. The ELV got On + Brightness; the RGBW pair got On +
-  Brightness + Hue + Saturation; nothing got ColorTemperature, since no
-  tunable-white fixture exists on this transformer. The type-4 pseudo-fixture
-  was excluded.
+  Brightness + Hue + Saturation, and later ColorTemperature as well (see the
+  white-point decision below). The type-4 pseudo-fixture was excluded.
 - Writes land exactly. HomeKit Hue 120 → device `hue 3333` → reads back 120°;
   Brightness 50 → `level 5000` → reads back 50. No drift on any axis, so no
   tile flicker.
@@ -119,10 +118,13 @@ three accessories, and they persist across a bridge restart — which is the
 `NAidFromFixtureId` stability claim above holding in practice, not just in
 tests.
 
-Still unexercised: Identify with someone watching the fixture, and the
-ColorTemperature characteristic itself. The *device* side of colour
-temperature is now measured — see the device-layer notes — so what is left
-untested is the mired conversion and the slider, not the wire.
+ColorTemperature is exercised too, on RGBW rather than on a tunable-white
+fixture, which does not exist on this transformer: the Home app's temperature
+control drives `mixColorTemp` and produces a white the colour wheel cannot.
+Switching back and forth between the colour and temperature tabs behaves.
+
+Still unexercised: Identify with someone watching the fixture, and any
+genuinely tunable-white fixture.
 
 ### What the device does that the bridge has to answer for
 
@@ -145,12 +147,11 @@ code rather than settled by it:
   every batch that carries On — worth doing only once the Home app is
   observed sending that combination. The tile is at least honest in the
   meantime, since the echoed state reports the light as on.
-- **`mixColorTemp` works on RGBW fixtures and does *not* turn them on.** That
-  answers the `BB(bruce)` in `accessory.py`: the white point is drivable, so
-  an RGBW fixture could carry ColorTemperature alongside Hue/Saturation. The
-  firmware treats them as mutually exclusive per request and flips `mode` to
-  follow whichever was written, so the bridge would have to pick one axis per
-  write — which is what the Home app does anyway. Still open.
+- **`mixColorTemp` works on RGBW fixtures and does *not* turn them on.**
+  Handled — it is what the RGBW white point is now driven through. The
+  firmware treats the two colour axes as mutually exclusive per request and
+  flips `mode` to follow whichever was written, so only one may be sent;
+  `_OnSetService` keeps the pending set down to one accordingly.
 
 ### What HAP-python actually requires
 
@@ -217,6 +218,20 @@ code rather than settled by it:
   magnitude is cosmetic it is obviously right, and if magnitude does drive
   output it still keeps the two axes from fighting. Revisit it only once the
   dark test lands.
+- **An RGBW fixture needs a white point, not just a colour wheel.** The RGB
+  triple drives its colour channels and never its white LED — measured, and
+  the reason a HomeKit "white" came out visibly blue: the Home app's white
+  swatch is Hue 251°, Saturation 5%, which converts faithfully to a slightly
+  blue RGB, and three coloured LEDs mixed to white are cool before that tint
+  is added. So RGBW carries ColorTemperature as well as Hue/Saturation, and
+  the two displace each other rather than racing.
+- **A colour the fixture got from us is not re-derived from it.** RGB is
+  8 bits per channel and hue is recomputed from it, so a round trip loses
+  several degrees at low saturation — HomeKit asked for 251°, the fixture
+  answered 253.8, and the swatch moved under the user a second later. While
+  the fixture holds exactly the triple we sent, what the user picked is the
+  better record; a colour set at the wall or in the WAC app fails that test
+  and reconciles normally. `_FIsRgbOurs` is the whole of it.
 - **Colour temperature endpoints snap rather than convert.** The reciprocal of
   370 mireds is 2703K — three Kelvin inside a 2700K fixture's limit, and a
   value that does not survive the round trip. `CColorTempRange` returns the
