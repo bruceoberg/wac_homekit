@@ -41,11 +41,15 @@ from .control import (
 	ObjStateWhite,
 )
 from .discovery import (
+	DISCOK,
 	SERVICE_TYPE,
 	CBrowser,
+	CWatcher,
 	DiscoFromTxt,
+	DiscokTryFromDisco,
 	FIsZeroconfAvailable,
 	LDiscoBrowse,
+	SDevent,
 	SDisco,
 	StrTryMacSuffix,
 )
@@ -94,8 +98,8 @@ __all__ = [
 	"CFixtures",
 
 	# Discovery. DiscoFromTxt is pure and Zeroconf-free — a consumer with its
-	# own mDNS stack should call it directly and ignore CBrowser, which needs
-	# the `discovery` extra and says so if it is missing.
+	# own mDNS stack should call it directly and ignore CBrowser and CWatcher,
+	# which need the `discovery` extra and say so if it is missing.
 	"DiscoFromTxt",
 	"StrTryMacSuffix",
 	"SDisco",
@@ -103,6 +107,14 @@ __all__ = [
 	"LDiscoBrowse",
 	"FIsZeroconfAvailable",
 	"SERVICE_TYPE",
+
+	# Long-lived discovery, for a consumer that has to notice devices
+	# appearing and moving after it started. Removals are advisory — see
+	# CWatcher.
+	"CWatcher",
+	"SDevent",
+	"DISCOK",
+	"DiscokTryFromDisco",
 
 	# Errors. Catch WacError to catch everything this library raises.
 	"WacError",

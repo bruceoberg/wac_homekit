@@ -12,7 +12,9 @@ from __future__ import annotations  # Forward refs without quotes
 
 import pytest
 
-from wac_iot import DiscoFromTxt, StrTryMacSuffix
+from pydantic import ValidationError
+
+from wac_iot import DISCOK, DiscoFromTxt, DiscokTryFromDisco, SDevent, StrTryMacSuffix
 from wac_iot.discovery import MpStrTxtNormalize
 
 # A synthetic MAC tail, used throughout.
@@ -173,3 +175,68 @@ class TestDiscoFromTxt:
 
 		assert disco.strMacSuffix is None
 		assert disco.strMac == "AABBCC0A1B2C"
+
+
+class TestDiscokTryFromDisco:
+	"""The diff that decides whether an announcement is news.
+
+	Devices re-announce on a timer, so "nothing changed" is the common case
+	and has to stay silent — otherwise the one announcement that matters, an
+	address moving, arrives buried in identical ones.
+	"""
+
+	def test_first_sighting_is_an_add(self) -> None:
+		disco = DiscoFromTxt(g_mpBytes, strHost=HOST, strIp="10.0.0.8")
+
+		assert DiscokTryFromDisco(None, disco) is DISCOK.Added
+
+	def test_identical_announcement_is_not_news(self) -> None:
+		discoPrev = DiscoFromTxt(g_mpBytes, strHost=HOST, strIp="10.0.0.8", nPort=443)
+		discoCur = DiscoFromTxt(g_mpBytes, strHost=HOST, strIp="10.0.0.8", nPort=443)
+
+		assert DiscokTryFromDisco(discoPrev, discoCur) is None
+
+	def test_new_address_is_an_update(self) -> None:
+		"""The case the whole watch exists for: a DHCP lease moving a device."""
+
+		discoPrev = DiscoFromTxt(g_mpBytes, strHost=HOST, strIp="10.0.0.8")
+		discoCur = DiscoFromTxt(g_mpBytes, strHost=HOST, strIp="10.0.0.9")
+
+		assert DiscokTryFromDisco(discoPrev, discoCur) is DISCOK.Updated
+
+	def test_firmware_change_is_an_update(self) -> None:
+		"""An OTA moves a TXT field with the address staying put."""
+
+		discoPrev = DiscoFromTxt(g_mpBytes, strHost=HOST, strIp="10.0.0.8")
+		discoCur = DiscoFromTxt(
+			g_mpBytes | {b"Firmware Ver": b"01.02.0004"},
+			strHost=HOST,
+			strIp="10.0.0.8",
+		)
+
+		assert DiscokTryFromDisco(discoPrev, discoCur) is DISCOK.Updated
+
+	def test_undocumented_txt_change_is_an_update(self) -> None:
+		"""Unknown keys are preserved, so they have to count as movement too."""
+
+		discoPrev = DiscoFromTxt(g_mpBytes, strHost=HOST)
+		discoCur = DiscoFromTxt(g_mpBytes | {b"Undocumented": b"surprise"}, strHost=HOST)
+
+		assert DiscokTryFromDisco(discoPrev, discoCur) is DISCOK.Updated
+
+
+class TestSDevent:
+	def test_carries_the_whole_disco(self) -> None:
+		disco = DiscoFromTxt(g_mpBytes, strHost=HOST, strIp="10.0.0.8")
+		devent = SDevent(discok=DISCOK.Added, disco=disco)
+
+		assert devent.discok is DISCOK.Added
+		assert devent.disco.strIp == "10.0.0.8"
+
+	def test_is_frozen(self) -> None:
+		"""An event describes something that already happened."""
+
+		devent = SDevent(discok=DISCOK.Added, disco=DiscoFromTxt({}, strHost=HOST))
+
+		with pytest.raises(ValidationError):
+			devent.discok = DISCOK.Removed

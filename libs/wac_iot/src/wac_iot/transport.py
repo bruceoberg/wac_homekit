@@ -92,8 +92,8 @@ class CTransport:  # tag = trans
 		self.fVerifyTls = fVerifyTls
 		self.cRetry = cRetry if cRetry is not None else self.g_cRetryDefault
 
-		strScheme = "https" if fTls else "http"
-		self.strBaseUrl = f"{strScheme}://{strHost}:{self.nPort}"
+		self.strScheme = "https" if fTls else "http"
+		self.strBaseUrl = self._StrBaseUrl()
 
 		# Both of these used to live on the session — the base URL as
 		# `base_url`, the TLS policy as a `TCPConnector`. Neither can be set on
@@ -135,6 +135,33 @@ class CTransport:  # tag = trans
 		# of them at once.
 
 		self.lock = asyncio.Lock()
+
+	def _StrBaseUrl(self) -> str:
+		return f"{self.strScheme}://{self.strHost}:{self.nPort}"
+
+	def SetHost(self, strHost: str) -> None:
+		"""Point this transport at a different address for the same device.
+
+		A DHCP lease change moves a device without changing anything else
+		about it, and a consumer that has built state around this transport —
+		a poll loop, entities, HomeKit accessories — wants that state to
+		survive the move. Rebuilding the transport would mean rebuilding all
+		of it.
+
+		Kept deliberately small: only the host moves. The session, the lock,
+		and the retry policy are unchanged, and a request already in flight
+		holds its own URL and finishes against the old address — which is
+		right, since that address is where the device was when the request
+		started.
+		"""
+
+		if strHost == self.strHost:
+			return
+
+		g_log.info("device moved: %s -> %s", self.strHost, strHost)
+
+		self.strHost = strHost
+		self.strBaseUrl = self._StrBaseUrl()
 
 	def StrUrl(self, strUri: str) -> str:
 		"""Absolute URL for an endpoint path."""

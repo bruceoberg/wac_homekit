@@ -410,6 +410,17 @@ control was a real user toggle that never reached the hardware.
   directly; do not try to reach its fixtures through a wall station.
 - There is no push channel. Polling is the only option; 5–10 seconds is the
   starting range for these ESP32-class devices.
+- **Discovery has to keep running, and its removals are advisory.** A device
+  is on DHCP, so its address moves without anything else about it changing;
+  `CWatcher` reports that as an `Updated` event and `CClient.SetHost` follows
+  it without disturbing anything a consumer built on that client. Removals
+  are the weak half: a device that loses power sends no mDNS goodbye and its
+  record just expires, while one that reboots can go and come back inside a
+  second. So the library reports what mDNS said and refuses to debounce it —
+  the only honest liveness test is whether the device answers a request, and
+  a polling consumer already has one. `DiscokTryFromDisco` is the pure diff
+  behind the add/update decision, and it stays silent when a re-announcement
+  carries nothing new.
 - **A group write reaches the fixtures promptly, but `/fixture` reports it
   tens of seconds late, per fixture.** Measured at 1 Hz against group 255:
   the write returns `result "0"` at once and the lights change within about a

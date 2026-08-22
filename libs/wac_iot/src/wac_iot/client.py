@@ -84,6 +84,16 @@ class CClient:  # tag = client
 	def strBaseUrl(self) -> str:
 		return self.trans.strBaseUrl
 
+	def SetHost(self, strHost: str) -> None:
+		"""Follow this device to a new address, keeping the open session.
+
+		For a consumer watching mDNS: a lease change re-advertises the same
+		device at a different address, and everything built on this client
+		stays valid across it. See `CTransport.SetHost`.
+		"""
+
+		self.trans.SetHost(strHost)
+
 	async def __aenter__(self) -> CClient:
 		await self.trans.Open()
 

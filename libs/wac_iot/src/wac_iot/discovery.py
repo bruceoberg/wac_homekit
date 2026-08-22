@@ -3,11 +3,13 @@
 
 `DiscoFromTxt` is pure: a TXT-record mapping in, a discovery result out, no
 I/O and no Zeroconf anywhere in its signature. `CBrowser` owns a Zeroconf
-instance and feeds it.
+instance and feeds it, either as a one-shot browse or — as `CWatcher` — as a
+stream of change events that runs for as long as the consumer wants it to.
 
 The split is deliberate. A Home Assistant integration receives its own
 service info from HA's shared Zeroconf instance and must never start a
-second one — it calls the parser directly and skips the browser entirely.
+second one — it calls the parser directly and skips both browser and watcher
+entirely.
 """
 
 from __future__ import annotations  # Forward refs without quotes
@@ -15,22 +17,24 @@ from __future__ import annotations  # Forward refs without quotes
 import asyncio
 import logging
 
-from typing import TYPE_CHECKING, Any, Mapping
+from collections.abc import Coroutine, Mapping
+from enum import IntEnum, auto
+from typing import TYPE_CHECKING, Any
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .models import SWac
 
-# Zeroconf backs `CBrowser` and nothing else, so it is an extra rather than a
-# hard dependency: `pip install wac_iot[discovery]`. A consumer with its own
-# mDNS stack — Home Assistant, which hands every integration a shared instance
-# — installs the bare package and calls `DiscoFromTxt` directly. Importing it
-# unconditionally would force a second Zeroconf into that process, so the
-# imports happen inside the `CBrowser` methods that need them.
+# Zeroconf backs `CBrowser` and `CWatcher` and nothing else, so it is an extra
+# rather than a hard dependency: `pip install wac_iot[discovery]`. A consumer
+# with its own mDNS stack — Home Assistant, which hands every integration a
+# shared instance — installs the bare package and calls `DiscoFromTxt`
+# directly. Importing it unconditionally would force a second Zeroconf into
+# that process, so the imports happen inside the methods that need them.
 
 if TYPE_CHECKING:
 	from zeroconf import ServiceStateChange, Zeroconf
-	from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
+	from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
 
 def FIsZeroconfAvailable() -> bool:
@@ -84,6 +88,56 @@ class SDisco(SWac):  # tag = disco
 	strMac: str | None = None
 	strMacSuffix: str | None = None     # tail of the MAC, parsed from the host name
 	mpStrTxt: dict[str, str] = Field(default_factory=dict)  # every TXT pair, decoded
+
+
+class DISCOK(IntEnum):  # tag = discok — kinds of discovery change
+	"""What happened to a device's advertisement.
+
+	`Removed` is the weak one. A device that loses power never sends a
+	goodbye, so its record simply expires minutes later; one that reboots may
+	drop and return inside a second. Report it faithfully and treat it as
+	advisory — see `CWatcher`.
+	"""
+
+	Added   = auto()
+	Updated = auto()
+	Removed = auto()
+
+
+class SDevent(BaseModel):  # tag = devent — one change to what mDNS is advertising
+	"""One discovery change: what happened, and to which device.
+
+	Carries the whole `SDisco` rather than a delta. A consumer reacting to an
+	address change wants the new address, and one reacting to an arrival
+	wants everything; splitting that into "what moved" would only mean
+	rejoining it at every call site.
+
+	For a `Removed`, the `SDisco` is the last one resolved — the device is by
+	definition not answering, so there is nothing fresher to carry.
+	"""
+
+	model_config = ConfigDict(frozen=True)
+
+	discok: DISCOK
+	disco: SDisco
+
+
+def DiscokTryFromDisco(discoPrev: SDisco | None, discoCur: SDisco) -> DISCOK | None:
+	"""What a freshly resolved advertisement means, given the last one seen.
+
+	None means nothing changed. Devices re-announce themselves on a timer and
+	after every network hiccup, so without this a consumer would see a steady
+	drip of updates carrying data it already has — and the one update that
+	matters, a DHCP lease moving the address, would be lost in it.
+	"""
+
+	if discoPrev is None:
+		return DISCOK.Added
+
+	if discoPrev == discoCur:
+		return None
+
+	return DISCOK.Updated
 
 
 def _StrDecode(obj: Any) -> str | None:
@@ -220,10 +274,13 @@ class CBrowser:  # tag = browser
 
 	def __init__(self, lStrAddr: list[str] | None = None) -> None:
 		if not FIsZeroconfAvailable():
+			# Named after whatever was actually constructed, so a CWatcher
+			# does not report a problem with CBrowser.
+
 			raise RuntimeError(
-				"CBrowser needs the zeroconf package: install wac_iot[discovery]. "
-				"To parse service info from an mDNS stack you already have, call "
-				"DiscoFromTxt instead."
+				f"{type(self).__name__} needs the zeroconf package: install "
+				"wac_iot[discovery]. To parse service info from an mDNS stack you "
+				"already have, call DiscoFromTxt instead."
 			)
 
 		self.azc: AsyncZeroconf | None = None
@@ -323,6 +380,188 @@ class CBrowser:  # tag = browser
 			return
 
 		self.mpStrDisco[strName] = DiscoFromServiceInfo(info)
+
+
+class CWatcher(CBrowser):  # tag = watcher
+	"""A browse that never ends, reported as a stream of change events.
+
+		async with CWatcher([strAddr]) as watcher:
+			async for devent in watcher:
+				...
+
+	An async iterator rather than a set of callbacks, deliberately. A
+	consumer's reaction to a device appearing is usually itself async — open
+	a session, read the device — and an `async for` lets that happen in the
+	consumer's own task with no re-entrancy to reason about. Wrapping this in
+	callbacks is a three-line loop; going the other way is not.
+
+	Zeroconf's notifications may arrive on a thread that is not the consumer's
+	loop, so the handoff happens here: the callback does nothing but
+	`call_soon_threadsafe` onto the loop this watcher was entered on. Nothing
+	a consumer touches is ever reached from another thread.
+
+	**`Removed` is advisory.** mDNS goodbyes are best-effort — a device that
+	loses power sends none, and its record lingers until it expires — while a
+	device that reboots can be removed and re-added inside a second. This
+	reports what mDNS said and nothing more; deciding what "gone" means is
+	consumer policy, and the honest test is whether the device answers a
+	request. Debouncing it here would only hide the raw signal from a consumer
+	that has a better test available.
+	"""
+
+	def __init__(self, lStrAddr: list[str] | None = None) -> None:
+		super().__init__(lStrAddr)
+
+		self.browser: AsyncServiceBrowser | None = None
+
+		# The loop the watcher was entered on, which is the only one events are
+		# ever delivered to. Captured in `__aenter__` rather than at
+		# construction, so building one outside a running loop is fine.
+
+		self.loop: asyncio.AbstractEventLoop | None = None
+
+		# Unbounded. The alternative is dropping events, and the event most
+		# worth having — a device's address moving — is exactly the one a
+		# consumer cannot recover from having missed. mDNS traffic for a
+		# handful of lighting controllers is nowhere near a volume worth
+		# bounding, and a consumer that stops iterating is a bug rather than a
+		# case to survive.
+		#
+		# None is the end-of-stream sentinel `__aexit__` pushes.
+
+		self.queueDevent: asyncio.Queue[SDevent | None] = asyncio.Queue()
+
+	async def __aenter__(self) -> CWatcher:
+		from zeroconf.asyncio import AsyncServiceBrowser
+
+		await super().__aenter__()
+
+		assert self.azc is not None  # narrowed for mypy; the base guarantees it
+
+		self.loop = asyncio.get_running_loop()
+
+		self.browser = AsyncServiceBrowser(
+			self.azc.zeroconf,
+			[SERVICE_TYPE],
+			handlers=[self._OnServiceStateChange],
+		)
+
+		return self
+
+	async def __aexit__(self, *args: object) -> None:
+		if self.browser is not None:
+			await self.browser.async_cancel()
+			self.browser = None
+
+		# Ends any `async for` parked on the queue, rather than leaving it
+		# waiting on a watcher that has stopped watching.
+
+		self.queueDevent.put_nowait(None)
+
+		await super().__aexit__(*args)
+
+	def __aiter__(self) -> CWatcher:
+		return self
+
+	async def __anext__(self) -> SDevent:
+		devent = await self.queueDevent.get()
+
+		if devent is None:
+			raise StopAsyncIteration
+
+		return devent
+
+	def _OnServiceStateChange(
+		self,
+		zeroconf: Zeroconf,
+		service_type: str,
+		name: str,
+		state_change: ServiceStateChange,
+	) -> None:
+		"""Zeroconf's callback, which may run on any thread. Only hands off.
+
+		`call_soon_threadsafe` is correct from the loop's own thread too, and
+		Zeroconf does not promise which thread this arrives on — so it is used
+		unconditionally rather than after a check that could go stale.
+		"""
+
+		if self.loop is None:
+			return
+
+		self.loop.call_soon_threadsafe(self._Dispatch, service_type, name, state_change)
+
+	def _Dispatch(self, strServiceType: str, strName: str, state_change: ServiceStateChange) -> None:
+		"""Turn one notification into an event. Runs on the consumer's loop."""
+
+		from zeroconf import ServiceStateChange
+
+		if state_change is ServiceStateChange.Removed:
+			self._Remove(strName)
+
+			return
+
+		# Both Added and Updated need the service resolved before there is
+		# anything worth reporting, and which of the two it is depends on what
+		# comes back — a re-announcement arrives as Added.
+
+		self._TaskTrack(self._ResolveAndReport(strServiceType, strName))
+
+	def _TaskTrack(self, cr: Coroutine[Any, Any, None]) -> None:
+		"""Run a resolve, holding a reference to it until it finishes.
+
+		The list is the base class's, so `__aexit__` cancels whatever is still
+		in flight. Removing on completion matters here in a way it does not
+		for a one-shot browse: a watcher lives as long as the process, and a
+		device re-announcing itself every few minutes would otherwise leave a
+		finished task behind every time.
+		"""
+
+		task = asyncio.ensure_future(cr)
+
+		self.lTask.append(task)
+		task.add_done_callback(self.lTask.remove)
+
+	async def _ResolveAndReport(self, strServiceType: str, strName: str) -> None:
+		"""Resolve a service and queue an event, if anything actually changed."""
+
+		from zeroconf.asyncio import AsyncServiceInfo
+
+		if self.azc is None:
+			return
+
+		info = AsyncServiceInfo(strServiceType, strName)
+
+		if not await info.async_request(self.azc.zeroconf, int(self.g_dTResolve * 1000)):
+			g_log.debug("no details resolved for %s", strName)
+
+			return
+
+		disco = DiscoFromServiceInfo(info)
+		discok = DiscokTryFromDisco(self.mpStrDisco.get(strName), disco)
+
+		self.mpStrDisco[strName] = disco
+
+		if discok is None:
+			return
+
+		g_log.debug("%s: %s", strName, discok.name.lower())
+
+		self.queueDevent.put_nowait(SDevent(discok=discok, disco=disco))
+
+	def _Remove(self, strName: str) -> None:
+		"""Report a service going away, using the last details resolved for it."""
+
+		disco = self.mpStrDisco.pop(strName, None)
+
+		if disco is None:
+			# Never resolved in the first place, so a consumer was never told
+			# it existed and has nothing to undo.
+
+			return
+
+		g_log.debug("%s: removed", strName)
+
+		self.queueDevent.put_nowait(SDevent(discok=DISCOK.Removed, disco=disco))
 
 
 async def LDiscoBrowse(
