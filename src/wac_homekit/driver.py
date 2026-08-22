@@ -16,6 +16,7 @@ from __future__ import annotations  # Forward refs without quotes
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 
@@ -27,7 +28,7 @@ from pyhap.accessory import Accessory, Bridge
 from pyhap.accessory_driver import AccessoryDriver
 from pyhap.encoder import AccessoryEncoder
 
-from wac_iot import CClient, CSnapshot, LDiscoBrowse, SDisco, WacError
+from wac_iot import DISCOK, CClient, CSnapshot, CWatcher, SDevent, SDisco, WacError
 
 from .accessory import AID_MAX, AID_MIN, CFixtureAccessory, TierTryFromFixturek
 from .netiface import StrAddrResolve
@@ -38,10 +39,16 @@ BRIDGE_NAME = "WAC Lighting"
 
 # Where the HAP pairing state lives. One file, holding the bridge's own MAC,
 # its keypair, and every paired controller — delete it and every Home app in
-# the house has to pair again. The default matches the StateDirectory a
-# systemd unit would hand this service.
+# the house has to pair again.
+#
+# Two homes for it, and which one is right depends on who is running the
+# bridge. Under systemd it is the StateDirectory the unit declares; for a
+# person trying the bridge out it has to be somewhere writable without root,
+# because a first run that dies on mkdir is a first run that teaches nothing.
+# `PathPersistResolve` picks between them.
 
-PERSIST_DIR_DEFAULT = Path("/var/lib/wac-homekit")
+PERSIST_DIR_SERVICE = Path("/var/lib/wac-homekit")
+PERSIST_DIR_NAME = "wac-homekit"
 PERSIST_FILE = "wac_homekit.state"
 
 # 51826 is the port Homebridge made conventional for a HomeKit bridge.
@@ -72,12 +79,37 @@ POLL_RETRY = 1
 class CDevicePoll:  # tag = dpoll
 	"""One device's client and the accessories built from its fixtures."""
 
-	def __init__(self, client: CClient) -> None:
+	def __init__(self, client: CClient, *, strDisco: str, strDeviceId: str) -> None:
 		self.client = client
+
+		# The mDNS instance name this device was discovered under, which is
+		# what a later discovery event names it by. Stable across a DHCP lease
+		# — the address in `client` is not, which is the whole point of
+		# keeping both.
+
+		self.strDisco = strDisco
+
+		# The device's own identifier, from its MAC. Stable across a rename
+		# too, so it is what catches the same transformer turning up under a
+		# second mDNS name.
+
+		self.strDeviceId = strDeviceId
+
 		self.mpAddrFacc: dict[int, CFixtureAccessory] = {}
 
-	async def Poll(self) -> None:
-		"""Read the whole device once and hand each fixture to its accessory."""
+		# Addresses already looked at and declined — a fan, a wall station, a
+		# fixture type this library does not model. Remembered so the poll can
+		# spot a genuinely new fixture with a set comparison, and so the "not a
+		# light" line is logged once rather than every five seconds forever.
+
+		self.setNAddrSkip: set[int] = set()
+
+	async def Poll(self) -> CSnapshot | None:
+		"""Read the whole device once and hand each fixture to its accessory.
+
+		Returns the snapshot so the bridge can look for fixtures that have
+		appeared since the last tick; None means the device did not answer.
+		"""
 
 		# Stamped before the read rather than after it. What an accessory needs
 		# to know is whether it was written while this data was in flight, and
@@ -97,10 +129,21 @@ class CDevicePoll:  # tag = dpoll
 			for facc in self.mpAddrFacc.values():
 				facc.MarkOffline()
 
-			return
+			return None
 
 		for nAddr, facc in self.mpAddrFacc.items():
 			facc.Reconcile(snap.mpAddrFixtureKnown.get(nAddr), tPoll=tPoll)
+
+		return snap
+
+	def SetNAddrUnbridged(self, snap: CSnapshot) -> set[int]:
+		"""Addresses in this snapshot that have no accessory and no verdict yet.
+
+		Pure set arithmetic on data the poll already fetched, so the common
+		answer — the empty set, every tick, forever — costs nothing.
+		"""
+
+		return snap.mpAddrFixtureKnown.keys() - self.mpAddrFacc.keys() - self.setNAddrSkip
 
 
 class CBridge(Bridge):  # tag = bridge
@@ -110,15 +153,41 @@ class CBridge(Bridge):  # tag = bridge
 		super().__init__(driver, BRIDGE_NAME)
 
 		self.dTPoll = dTPoll
-		self.lDpoll: list[CDevicePoll] = []
+
+		# Every bridged device, keyed by the mDNS instance name it was
+		# discovered under. Keyed by that rather than by address because the
+		# address is the thing that moves: a DHCP lease change re-announces
+		# the same name somewhere else, and matching on it is how that becomes
+		# a re-point instead of a second copy of every light.
+
+		self.mpStrDpoll: dict[str, CDevicePoll] = {}
+
+		# Whether the driver is serving yet. Before it is, there is no
+		# advertisement to update and no controller to tell — see
+		# `_ConfigChanged`.
+
+		self.fServing = False
 
 	async def FTryAddDevice(self, disco: SDisco) -> bool:
 		"""Open a client for a discovered device and bridge its light fixtures.
 
-		False means nothing was added — the device could not be read, or it
-		had no fixture this phase handles. Either way it is reported and the
-		remaining devices still get their chance.
+		False means nothing was added — already bridged, unreadable, or
+		carrying no fixture this phase handles. Either way it is reported and
+		whatever else is being added still gets its chance.
+
+		Callers must not run two of these at once for the same device. Nothing
+		here enforces it, because nothing needs to: every call site is the
+		single-threaded event handler in `WatchAsync`, which awaits one event
+		to completion before taking the next. A device announcing itself three
+		times while its first add is still reading the transformer therefore
+		finds it already in `mpStrDpoll` by the time its second event is
+		looked at.
 		"""
+
+		if disco.strHost in self.mpStrDpoll:
+			g_log.debug("%s: already bridged", disco.strHost)
+
+			return False
 
 		if not disco.strIp:
 			g_log.error("%s: advertised no address, skipping", disco.strHost)
@@ -134,52 +203,83 @@ class CBridge(Bridge):  # tag = bridge
 		try:
 			await client.Open()
 			snap = await client.SnapPoll()
+			strDeviceId = snap.StrDeviceId()
 		except WacError as exc:
 			g_log.error("%s: could not be read, skipping: %s", disco.strIp, exc)
 			await client.Close()
 
 			return False
 
-		dpoll = self._DpollFromSnap(client, snap)
+		if any(dpoll.strDeviceId == strDeviceId for dpoll in self.mpStrDpoll.values()):
+			# The same transformer answering under a second mDNS name — a
+			# rename leaving the old record still cached, most plausibly.
+			# Bridging it twice would mean two accessories per fixture built
+			# from the same stable fixture id, so the second of each would
+			# collide on AID and get shifted off it.
 
-		if not dpoll.mpAddrFacc:
+			g_log.info("%s: device %s is already bridged, skipping", disco.strHost, strDeviceId)
+			await client.Close()
+
+			return False
+
+		dpoll = CDevicePoll(client, strDisco=disco.strHost, strDeviceId=strDeviceId)
+
+		if not self._CFaccAdd(dpoll, snap):
 			g_log.warning("%s: no light fixtures, skipping", disco.strIp)
 			await client.Close()
 
 			return False
 
-		self.lDpoll.append(dpoll)
+		self.mpStrDpoll[disco.strHost] = dpoll
 
 		g_log.info(
 			"%s: bridged %d light fixture(s) from device %s",
 			disco.strIp,
 			len(dpoll.mpAddrFacc),
-			snap.StrDeviceId(),
+			strDeviceId,
 		)
+
+		self._ConfigChanged()
 
 		return True
 
-	def _DpollFromSnap(self, client: CClient, snap: CSnapshot) -> CDevicePoll:
-		"""Build an accessory for every light fixture the snapshot knows about.
+	def _CFaccAdd(self, dpoll: CDevicePoll, snap: CSnapshot) -> int:
+		"""Build an accessory for each of this device's lights that lacks one.
+
+		Serves both the first snapshot of a device and every one after it: a
+		fixture commissioned into a running system shows up in the next poll
+		and becomes an accessory by exactly this route, with no separate path
+		to keep in step.
 
 		Built from `mpAddrFixtureKnown`, not `mpAddrFixture`: the ColorScaping
 		transformer reports a pseudo-fixture with empty state that would
 		become an accessory unable to report or change anything.
+
+		Returns how many were added, so the caller can tell whether the
+		accessory list moved and decide once — rather than once per fixture —
+		to say so.
 		"""
 
-		dpoll = CDevicePoll(client)
+		cFacc = 0
 
-		for nAddr, fixture in snap.mpAddrFixtureKnown.items():
+		for nAddr in sorted(dpoll.SetNAddrUnbridged(snap)):
+			fixture = snap.mpAddrFixtureKnown[nAddr]
 			tier = TierTryFromFixturek(fixture.fixturek)
 
 			if tier is None:
-				g_log.info("%s: not a light, skipping — %s", client.strHost, fixture.StrDescribe())
+				g_log.info(
+					"%s: not a light, skipping — %s",
+					dpoll.client.strHost,
+					fixture.StrDescribe(),
+				)
+
+				dpoll.setNAddrSkip.add(nAddr)
 
 				continue
 
 			facc = CFixtureAccessory(
 				self.driver,
-				client,
+				dpoll.client,
 				nAddr=nAddr,
 				strFixtureId=snap.StrFixtureId(nAddr),
 				fixture=fixture,
@@ -190,8 +290,27 @@ class CBridge(Bridge):  # tag = bridge
 
 			self.add_accessory(facc)
 			dpoll.mpAddrFacc[nAddr] = facc
+			cFacc += 1
 
-		return dpoll
+		return cFacc
+
+	def _ConfigChanged(self) -> None:
+		"""Tell paired controllers the accessory list moved.
+
+		Every call rewrites the persist file and bumps the advertised config
+		number, so callers batch it — once per device that contributed
+		fixtures, never once per fixture.
+
+		A no-op until the driver is serving. During the startup grace window
+		there is nothing advertising and nobody paired, and calling it then
+		would write pairing state for a bridge the driver has not been handed
+		yet.
+		"""
+
+		if not self.fServing:
+			return
+
+		self.driver.config_changed()
 
 	def _NAidFree(self, nAid: int, strName: str) -> int:
 		"""The given AID, or the next free one if something already holds it.
@@ -215,10 +334,127 @@ class CBridge(Bridge):  # tag = bridge
 
 		return nAidNext
 
+	# -----------------------------------------------------------------------
+	# Discovery, for as long as the bridge runs
+	# -----------------------------------------------------------------------
+
+	async def GraceAsync(self, watcher: CWatcher, dTGrace: float) -> None:
+		"""Handle discovery events for a fixed window before first serving.
+
+		The devices are nearly always already on the network when the bridge
+		starts, and a bridge that comes up empty and fills in over the next
+		few seconds shows a controller an accessory list that changes right
+		after it connected. Waiting the window out costs a few seconds once
+		and makes the ordinary case arrive complete.
+
+		Not a deadline on anything: whatever has not answered by the end
+		arrives through `WatchAsync` instead and is bridged at runtime.
+		"""
+
+		loop = asyncio.get_running_loop()
+		tEnd = loop.time() + dTGrace
+
+		while True:
+			dTLeft = tEnd - loop.time()
+
+			if dTLeft <= 0:
+				return
+
+			try:
+				devent = await asyncio.wait_for(anext(watcher), dTLeft)
+			except (TimeoutError, StopAsyncIteration):
+				return
+
+			await self.OnDevent(devent)
+
+	async def WatchAsync(self, watcher: CWatcher) -> None:
+		"""Handle discovery events for the rest of the process's life."""
+
+		async for devent in watcher:
+			try:
+				await self.OnDevent(devent)
+			except Exception:
+				# Deliberately broad. Whatever went wrong with one device, a
+				# bridge that quietly stops noticing every *other* device is a
+				# far worse outcome — and the symptom, months later, is a new
+				# light that never appears.
+
+				g_log.exception("%s: error handling discovery event", devent.disco.strHost)
+
+	async def OnDevent(self, devent: SDevent) -> None:
+		"""React to one discovery change. All of the bridge's mDNS policy.
+
+		Serialized by its callers, one event at a time — see `FTryAddDevice`.
+		"""
+
+		match devent.discok:
+			case DISCOK.Added:
+				await self.FTryAddDevice(devent.disco)
+
+			case DISCOK.Updated:
+				await self._OnDeviceMoved(devent.disco)
+
+			case DISCOK.Removed:
+				# Advisory, and acted on by doing nothing. An mDNS goodbye is
+				# best-effort — a device that loses power sends none at all,
+				# and one that reboots can go and return inside a second — so
+				# the only trustworthy liveness test is whether it answers a
+				# request, which the poll loop already makes every few seconds
+				# and already turns into "No Response" on every one of that
+				# device's lights. A device that comes back resumes polling
+				# with no ceremony.
+				#
+				# BB(bruce): and nothing is ever removed from the bridge. A
+				# fixture or a device that is genuinely gone stays on show as
+				# No Response until a restart. Taking an accessory out of a
+				# live bridge has pairing-state consequences — iOS remembers
+				# what it paired with by AID — that deserve their own phase.
+
+				g_log.debug("%s: mDNS says gone; leaving it to the poll", devent.disco.strHost)
+
+	async def _OnDeviceMoved(self, disco: SDisco) -> None:
+		"""Follow a device whose advertisement changed — nearly always its IP.
+
+		A DHCP lease change is the case this exists for. Without it the poll
+		loop keeps talking to an address the device no longer has, forever,
+		and every light on it reads as No Response until the bridge is
+		restarted.
+
+		The client is re-pointed rather than rebuilt, and the accessories are
+		left completely alone: they are what iOS paired with, and their AIDs,
+		their names and their current values all have to survive a move that
+		the user never even sees.
+		"""
+
+		dpoll = self.mpStrDpoll.get(disco.strHost)
+
+		if dpoll is None:
+			# An update for something never bridged is an add that did not
+			# take — a device that was unreachable the first time round, most
+			# likely. Its re-announcement is the second chance.
+
+			await self.FTryAddDevice(disco)
+
+			return
+
+		if not disco.strIp or disco.strIp == dpoll.client.strHost:
+			# Something else moved: a firmware version after an OTA, say.
+			# Nothing here is built on any of it.
+
+			return
+
+		g_log.info("%s: moved to %s", disco.strHost, disco.strIp)
+
+		dpoll.client.SetHost(disco.strIp)
+
+	# -----------------------------------------------------------------------
+	# Serving
+	# -----------------------------------------------------------------------
+
 	async def CloseClients(self) -> None:
 		"""Close every device session this bridge opened."""
 
-		for dpoll in self.lDpoll:
+		for dpoll in self.mpStrDpoll.values():
 			await dpoll.client.Close()
 
 	async def run(self) -> None:
@@ -239,8 +475,14 @@ class CBridge(Bridge):  # tag = bridge
 	async def _PollAll(self) -> None:
 		"""One tick: every device, concurrently."""
 
+		# Snapshotted, because a discovery event handled while this tick is in
+		# flight may add a device — and a dict that changes size during
+		# iteration raises.
+
+		lDpoll = list(self.mpStrDpoll.values())
+
 		lResult = await asyncio.gather(
-			*(dpoll.Poll() for dpoll in self.lDpoll),
+			*(dpoll.Poll() for dpoll in lDpoll),
 			return_exceptions=True,
 		)
 
@@ -249,13 +491,36 @@ class CBridge(Bridge):  # tag = bridge
 		# poll loop silently and leave the bridge answering with stale values
 		# forever.
 
-		for dpoll, objResult in zip(self.lDpoll, lResult):
+		for dpoll, objResult in zip(lDpoll, lResult):
 			if isinstance(objResult, BaseException):
 				g_log.exception(
 					"%s: unexpected error while polling",
 					dpoll.client.strHost,
 					exc_info=objResult,
 				)
+
+				continue
+
+			if objResult is None:
+				continue
+
+			# A fixture commissioned into a running system arrives here — the
+			# poll already read it, so noticing costs a set comparison and no
+			# extra request. Batched per device: one config change however
+			# many fixtures a single device contributed.
+
+			if self._CFaccAdd(dpoll, objResult):
+				self._ConfigChanged()
+
+	def setup_message(self) -> None:
+		"""Nothing. `PrintSetupCode` says all of this, and says it better.
+
+		HAP-python prints its own pairing block here — but only when the
+		bridge is unpaired, and its text advises installing
+		`HAP-python[QRCode]` for a feature this bridge already provides
+		without it. Left in place it would contradict the QR code printed a
+		moment later.
+		"""
 
 	async def stop(self) -> None:
 		await super().stop()
@@ -302,6 +567,48 @@ class CEncoderPretty:  # tag = encp
 		AccessoryEncoder.load_into(fp, state)
 
 
+def PathPersistResolve(
+	pathGiven: Path | None,
+	*,
+	pathService: Path = PERSIST_DIR_SERVICE,
+) -> Path:
+	"""Where the pairing state should live, given what the user asked for.
+
+	Three cases, in order:
+
+	1. `--persist-dir` was given. Honored exactly, including failing later on
+	   a directory that cannot be created — a bridge that quietly pairs
+	   somewhere other than where it was told is worse than one that refuses
+	   to start.
+	2. The service directory already exists and is writable. That is systemd:
+	   `StateDirectory=wac-homekit` creates it before the unit runs, so its
+	   presence is a reliable signal that this is the service and not a
+	   person at a terminal.
+	3. Otherwise the per-user state directory, created on demand. This is
+	   what makes a blind first run work at all — case 2's directory needs
+	   root to create, and someone trying the bridge out should not need it.
+
+	The service check is `os.access` rather than `exists()` because a
+	directory that is there but not writable is no use, and the point of
+	looking is to avoid a crash rather than to detect systemd for its own
+	sake. A nonexistent path answers False to the same call, so one test
+	covers both.
+	"""
+
+	if pathGiven is not None:
+		return pathGiven
+
+	if os.access(pathService, os.W_OK | os.X_OK):
+		return pathService
+
+	# XDG's own rule: an unset *or empty* variable falls back to the default.
+
+	strStateHome = os.environ.get("XDG_STATE_HOME")
+	pathStateHome = Path(strStateHome) if strStateHome else Path.home() / ".local" / "state"
+
+	return pathStateHome / PERSIST_DIR_NAME
+
+
 def DriverBuild(
 	*,
 	pathPersistDir: Path,
@@ -343,9 +650,14 @@ def PrintNoDevices(dTBrowse: float, strAddr: str) -> None:
 	The same guidance `wac_iot discover` prints, because the failure looks
 	identical and is nearly always the same cause: a blocked process rather
 	than an absent device.
+
+	Printed and then carried on from, since the bridge now serves an empty
+	bridge and waits. Worth printing anyway: a user who is looking at this
+	because their lights never appeared needs the diagnosis, and by the time
+	they notice, the startup window is long past.
 	"""
 
-	print(f"no WAC devices answered in {dTBrowse:g}s on {strAddr} — nothing to bridge")
+	print(f"no WAC devices answered in {dTBrowse:g}s on {strAddr}")
 	print()
 	print("if the device is on a link this address cannot reach, name the right")
 	print("one with --interface (an interface name, an address, or 'wifi').")
@@ -366,46 +678,165 @@ def PrintNoDevices(dTBrowse: float, strAddr: str) -> None:
 		print("either. if it lists devices and this does not, the process is blocked.")
 
 
-def PrintSetupCode(strPincode: str) -> None:
-	"""Show the setup code grouped the way the Home app asks for it.
+def PrintQrXhm(strXhmUri: str) -> None:
+	"""Render an X-HM setup URI as a QR code on the terminal.
 
-	HAP-python prints it 3-2-3, which is the format the protocol hashes but
-	not the one on screen during manual entry — the Home app offers two
-	groups of four. Printing both saves regrouping eight digits by eye at the
-	exact moment a mistyped one reads as a pairing failure.
+	`invert=True` because the quiet zone has to read as the *light* side and
+	the modules as the dark one: inverted, the border is drawn with block
+	characters, which on the dark terminal this normally runs in — a shell,
+	or `journalctl` — is exactly right. On a light background it comes out
+	reversed, which most scanners still read.
+	"""
+
+	import qrcode
+
+	qr = qrcode.QRCode(border=2)
+
+	qr.add_data(strXhmUri)
+	qr.print_ascii(invert=True)
+
+
+def PrintSetupCode(strPincode: str, strXhmUri: str | None) -> None:
+	"""Show every way there is to pair with this bridge.
+
+	The digits first, and grouped twice: HAP-python prints them 3-2-3, which
+	is the format the protocol hashes, while the Home app's manual entry
+	offers two groups of four. Printing both saves regrouping eight digits by
+	eye at the exact moment a mistyped one reads as a pairing failure.
+
+	Then the same code as a QR, which is what pairing actually looks like on
+	a phone — point the camera, done. It is additive and never load-bearing:
+	the digits are printed before anything can go wrong with it, and a
+	failure falls back to printing the URI as text.
+
+	Printed on every startup rather than only the first. The code is stable
+	once generated — HAP-python persists it with the rest of the state — and
+	under systemd this is what makes `journalctl -u wac-homekit` enough to
+	pair with, without a file to go and read.
 	"""
 
 	strDigits = strPincode.replace("-", "")
 
 	print(f"setup code: {strDigits[:4]} {strDigits[4:]}   (entered as {strPincode})")
 
+	if strXhmUri is None:
+		return
+
+	print()
+
+	try:
+		PrintQrXhm(strXhmUri)
+	except Exception as exc:
+		# Deliberately broad, and deliberately quiet. Nothing about rendering
+		# a QR code is worth failing a startup over, and the digits above are
+		# already on screen.
+
+		g_log.debug("could not render the setup QR code: %s", exc)
+		print(f"setup URI: {strXhmUri}")
+
+
+# The HAP setup payload, which is what an X-HM URI carries: a version, some
+# reserved bits, the accessory category, a flags nibble, and the eight-digit
+# setup code, packed into 47 bits and written in base 36.
+#
+# Built here rather than through `Accessory.xhm_uri`, which does exactly this
+# and would be the obvious thing to call. It is unusable without the
+# `HAP-python[QRCode]` extra: `base36` is imported only under HAP-python's own
+# `SUPPORT_QR_CODE` flag, so calling it in a plain install raises NameError
+# from inside the method. Installing that extra to reach it would also drag in
+# `pyqrcode`, which would then print a second QR code of its own next to ours.
+#
+# The layout is HAP's, not HAP-python's, and has been stable across the
+# protocol's life — the encoding below is not tracking an implementation
+# detail that can move under it.
+
+XHM_PREFIX = "X-HM://"
+XHM_PAYLOAD_LEN = 9        # base-36 digits, zero-padded
+XHM_FLAG_IP = 2            # this bridge is reachable over IP
+
+XHM_BITS_RESERVED = 4
+XHM_BITS_CATEGORY = 8
+XHM_BITS_FLAGS = 4
+XHM_BITS_PINCODE = 27
+
+g_strBase36Digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def StrBase36(nValue: int) -> str:
+	"""A non-negative integer in base 36, digits 0-9 then A-Z."""
+
+	if not nValue:
+		return g_strBase36Digits[0]
+
+	lStrDigit: list[str] = []
+
+	while nValue:
+		nValue, iDigit = divmod(nValue, 36)
+		lStrDigit.append(g_strBase36Digits[iDigit])
+
+	return "".join(reversed(lStrDigit))
+
+
+def StrXhmUri(nCategory: int, strPincode: str, strSetupId: str) -> str:
+	"""The setup URI a HomeKit controller expects behind a pairing QR code."""
+
+	nPayload = 0                                    # version, always zero so far
+
+	nPayload = (nPayload << XHM_BITS_RESERVED)
+	nPayload = (nPayload << XHM_BITS_CATEGORY) | (nCategory & 0xFF)
+	nPayload = (nPayload << XHM_BITS_FLAGS) | XHM_FLAG_IP
+	nPayload = (nPayload << XHM_BITS_PINCODE) | (int(strPincode.replace("-", "")) & 0x7FFFFFFF)
+
+	return XHM_PREFIX + StrBase36(nPayload).rjust(XHM_PAYLOAD_LEN, "0") + strSetupId
+
+
+def StrTryXhmUri(bridge: CBridge) -> str | None:
+	"""The bridge's X-HM setup URI, or None if it could not be built.
+
+	Guarded because it is decoration: it reaches into driver state for the
+	pincode and the setup id, and a shape this has not seen must not be what
+	stops a bridge from starting.
+	"""
+
+	try:
+		return StrXhmUri(
+			bridge.category,
+			bridge.driver.state.pincode.decode(),
+			bridge.driver.state.setup_id,
+		)
+	except Exception as exc:
+		g_log.debug("could not build the setup URI: %s", exc)
+
+		return None
+
 
 async def NRun(
 	*,
 	dTBrowse: float,
 	dTPoll: float,
-	pathPersistDir: Path,
+	pathPersistDir: Path | None,
 	nPort: int,
 	strPincode: str | None,
 	strIface: str,
+	fRequireDevices: bool,
 ) -> int:
-	"""Discover, bridge, serve, and shut down cleanly. Returns an exit code."""
+	"""Discover, bridge, serve, and shut down cleanly. Returns an exit code.
+
+	Written to be started blind, on a network with nothing on it yet. An
+	empty result is a log line rather than an exit: HomeKit is perfectly
+	happy with an empty bridge, pairing works, and the watch bridges devices
+	as they appear. `--require-devices` restores the old behaviour for a
+	script that wants an exit code out of "is anything there".
+	"""
 
 	# Resolved once and used for both halves, so the interface we browse on
 	# and the address we advertise can never drift apart.
 
 	strAddr = StrAddrResolve(strIface)
+	pathPersistDir = PathPersistResolve(pathPersistDir)
 
 	g_log.info("bridging on %s", strAddr)
-
-	lDisco = await LDiscoBrowse(dTBrowse, [strAddr])
-
-	if not lDisco:
-		PrintNoDevices(dTBrowse, strAddr)
-
-		return 1
-
-	g_log.info("discovered %d device(s)", len(lDisco))
+	g_log.info("pairing state in %s", pathPersistDir)
 
 	loop = asyncio.get_running_loop()
 	driver = DriverBuild(
@@ -418,36 +849,70 @@ async def NRun(
 
 	bridge = CBridge(driver, dTPoll=dTPoll)
 
-	for disco in lDisco:
-		await bridge.FTryAddDevice(disco)
+	# One watch for the whole run, opened before anything is bridged. The
+	# startup window is not a separate browse — it is the first `dTBrowse`
+	# seconds of this same stream, which is what keeps a device announcing
+	# itself right on the boundary from falling between two browsers.
 
-	if not bridge.accessories:
-		g_log.error("no light fixtures found on any discovered device")
-		await bridge.CloseClients()
+	async with CWatcher([strAddr]) as watcher:
+		await bridge.GraceAsync(watcher, dTBrowse)
 
-		return 1
+		if not bridge.accessories:
+			# Two different failures that used to read the same. An empty
+			# network is nearly always a blocked process and gets the whole
+			# diagnosis; devices that answered but carry nothing bridgeable is
+			# a different situation entirely, and printing the mDNS
+			# troubleshooting for it would send someone hunting a firewall
+			# rule that is not there.
 
-	# Only now, because add_accessory writes the persist file and would leave
-	# pairing state behind for a bridge that never served anything.
+			if not watcher.mpStrDisco:
+				PrintNoDevices(dTBrowse, strAddr)
+			else:
+				g_log.warning(
+					"%d device(s) answered, none with a light fixture to bridge",
+					len(watcher.mpStrDisco),
+				)
 
-	driver.add_accessory(bridge)
+			if fRequireDevices:
+				await bridge.CloseClients()
 
-	evStop = asyncio.Event()
+				return 1
 
-	for sig in (signal.SIGINT, signal.SIGTERM):
-		loop.add_signal_handler(sig, evStop.set)
+			g_log.warning("serving an empty bridge; devices will be added as they appear")
 
-	await driver.async_start()
+		driver.add_accessory(bridge)
 
-	PrintSetupCode(driver.state.pincode.decode())
+		# Everything after this point may change the accessory list on a live
+		# bridge, which is what `config_changed` exists to announce.
 
-	try:
-		await evStop.wait()
-	finally:
+		bridge.fServing = True
+
+		evStop = asyncio.Event()
+
 		for sig in (signal.SIGINT, signal.SIGTERM):
-			loop.remove_signal_handler(sig)
+			loop.add_signal_handler(sig, evStop.set)
 
-		g_log.info("shutting down")
-		await driver.async_stop()
+		taskWatch = asyncio.create_task(bridge.WatchAsync(watcher))
+
+		await driver.async_start()
+
+		PrintSetupCode(driver.state.pincode.decode(), StrTryXhmUri(bridge))
+
+		try:
+			await evStop.wait()
+		finally:
+			for sig in (signal.SIGINT, signal.SIGTERM):
+				loop.remove_signal_handler(sig)
+
+			g_log.info("shutting down")
+
+			# Cancelled explicitly rather than left to the watcher's own
+			# end-of-stream sentinel: `async_stop` waits on the poll loop, and
+			# a discovery event arriving mid-shutdown would be adding
+			# accessories to a bridge on its way out.
+
+			taskWatch.cancel()
+
+			await driver.async_stop()
 
 	return 0

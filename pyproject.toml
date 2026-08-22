@@ -9,6 +9,7 @@ requires-python = ">=3.13"
 dependencies = [
     "hap-python>=5.0.0",
     "ifaddr>=0.2.0",
+    "qrcode>=8.2",
     "wac-iot[discovery]",
 ]
 
@@ -44,6 +45,13 @@ strict = true
 # HAP-python ships no py.typed marker, so everything it exports is Any.
 [[tool.mypy.overrides]]
 module = ["pyhap.*"]
+ignore_missing_imports = true
+
+# qrcode ships no py.typed either. Its stub package drags Pillow in as a dev
+# dependency, which is a lot of wheel for the one `print_ascii` call the setup
+# code goes through.
+[[tool.mypy.overrides]]
+module = ["qrcode.*"]
 ignore_missing_imports = true
 
 # ... which makes Accessory and Bridge Any-typed bases. Subclassing them is the

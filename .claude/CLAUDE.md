@@ -83,7 +83,8 @@ The two facts from it most likely to bite on the HomeKit side:
 ## The HomeKit side
 
 Built on HAP-python 5.0. `convert.py` owns the units, `accessory.py` turns one
-`CFixture` into one Lightbulb, `driver.py` owns the `Bridge` and the poll loop.
+`CFixture` into one Lightbulb, `driver.py` owns the `Bridge`, the poll loop,
+and the discovery watch.
 Lights only — `TierTryFromFixturek` returning None is the filter, and adding a
 fixture type to `g_mpFixturekTier` is the whole change needed to bridge it.
 
@@ -218,6 +219,89 @@ code rather than settled by it:
 - QR-code pairing needs the `HAP-python[QRCode]` extra, which is not
   installed; startup prints the numeric code only.
 
+### Running as a service
+
+The bridge is written to be started blind — on a network with nothing on it
+yet, by someone who has not read any of this.
+
+- **An empty network is not an error.** Nothing answering the startup browse
+  logs the `PrintNoDevices` diagnosis and then serves an empty bridge anyway.
+  HomeKit is fine with one: pairing works, and accessories arriving later show
+  up. `--require-devices` restores the old exit-1, for a script that wants an
+  answer to "is anything there". Note the two failures are told apart —
+  nothing answered mDNS at all gets the blocked-process diagnosis, devices
+  that answered but carry no light gets a plain warning, because sending
+  someone hunting a firewall rule that is not there is worse than saying
+  less.
+- **`--browse` is a grace window, not a browse.** It is the first N seconds of
+  the same `CWatcher` stream that then runs for the life of the process, so a
+  device announcing itself right on the boundary cannot fall between two
+  browsers. Its only job is to let the ordinary case — devices already
+  present — come up populated rather than popping in one at a time after a
+  controller has already connected.
+- **Runtime additions go through one path, whatever noticed them.** A device
+  the watch finds and a fixture the poll finds both end at `_CFaccAdd`, which
+  builds accessories for whatever the device has and this bridge does not.
+  `driver.config_changed()` rewrites the persist file on every call, so it is
+  called once per device that contributed, never once per fixture — and not
+  at all until `fServing`, since during the grace window there is nothing
+  advertising and nobody paired.
+- **A fixture appearing on a running device costs nothing to notice.** The
+  poll already read the whole transformer, so `SetNAddrUnbridged` is set
+  arithmetic on data in hand. Addresses already declined are remembered in
+  `setNAddrSkip`, which is what keeps the "not a light" line to one per
+  fixture instead of one every five seconds forever.
+- **A device's IP is followed, never rebuilt around.** `mpStrDpoll` is keyed
+  by mDNS instance name precisely because that is the part that does not move;
+  a lease change re-announces the same name at a new address and
+  `CClient.SetHost` re-points the transport under the accessories. The
+  accessories themselves are untouched — they are what iOS paired with, and
+  their AIDs, names and values all have to survive a move the user never sees.
+  Before this, a lease change stranded the poll loop on a dead address until
+  the bridge was restarted.
+- **mDNS removals are ignored on purpose.** They are advisory (see the device
+  layer), and the poll loop already turns an unreachable device into No
+  Response on every one of its lights — which is the correct HomeKit
+  presentation and is based on a real request rather than on a missing packet.
+  A device that returns resumes polling with no ceremony.
+- **Nothing is ever removed from the bridge.** A fixture or device that is
+  genuinely gone stays on show as No Response until a restart. Removing an
+  accessory from a live bridge has pairing-state consequences that deserve
+  their own phase; there is a `BB(bruce)` at the natural place.
+- **Discovery events are handled one at a time, and that is the whole of the
+  race protection.** `WatchAsync` awaits each `OnDevent` to completion, so a
+  device that announces itself three times during its own first add finds
+  itself already in `mpStrDpoll` by the second event. Nothing needs a lock
+  because nothing is concurrent.
+- **The persist directory resolves rather than defaulting.** `--persist-dir`
+  if given, else `/var/lib/wac-homekit` when it already exists and is writable
+  (systemd's `StateDirectory` creates it before the unit runs, which makes its
+  presence a reliable signal), else `$XDG_STATE_HOME/wac-homekit` or
+  `~/.local/state/wac-homekit`. The old unconditional `/var/lib` default made
+  a blind first run die on mkdir. Whichever is chosen is logged at info,
+  because pairing state is the one file a user may need to go and find.
+
+### Pairing presentation
+
+- **The setup code is printed on every startup**, not only the first. It is
+  stable once generated, and under systemd this is what makes
+  `journalctl -u wac-homekit` sufficient to pair with.
+- **The QR code is rendered here, not by HAP-python.** `Accessory.xhm_uri()`
+  looks like the thing to call and is unusable without the
+  `HAP-python[QRCode]` extra: `base36` is imported only under HAP-python's own
+  `SUPPORT_QR_CODE` flag, so in a plain install the method raises `NameError`
+  from inside itself. Installing that extra to reach it would also pull in
+  `pyqrcode`, which then prints a second QR code next to ours. So `StrXhmUri`
+  packs the payload itself — the layout is HAP's and has been stable across
+  the protocol's life — and `qrcode` renders it. `CBridge.setup_message` is
+  overridden to nothing for the same reason: HAP-python's own block advises
+  installing an extra for a feature this bridge already has.
+- **The digits print before the QR can fail.** The QR is additive; a rendering
+  failure logs at debug and falls back to printing the URI as text.
+- `invert=True` on `print_ascii`, because the quiet zone has to read as the
+  light side — correct on the dark terminal a shell or `journalctl` normally
+  is.
+
 ### Decisions worth not relitigating
 
 - **AIDs must be stable across restarts** — iOS remembers which accessory in a
@@ -318,6 +402,12 @@ pure functions whose arithmetic is easy to get subtly wrong:
   machine. The `networksetup` stanza parser is the one with a real trap: the
   device name arrives on a line *after* the port name identifying it, so a
   naive parse returns whichever device it happened to see first.
+- persist-directory resolution, with the service directory injected so the
+  suite never depends on whether this particular machine happens to have
+  `/var/lib/wac-homekit` — which is exactly the ambiguity the resolution
+  exists to remove.
+- the X-HM setup payload, unpacked field by field rather than compared against
+  a fixed string, which would pass just as happily with two fields transposed.
 
 The accessory and driver layers need a real device and a real Home app; a
 HAP-python test harness would only be testing HAP-python.

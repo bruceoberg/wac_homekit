@@ -14,7 +14,7 @@ from pathlib import Path
 from wac_iot import WacError
 
 from . import __version__
-from .driver import PERSIST_DIR_DEFAULT, POLL_INTERVAL_DEFAULT, PORT_DEFAULT, NRun
+from .driver import PERSIST_DIR_SERVICE, POLL_INTERVAL_DEFAULT, PORT_DEFAULT, NRun
 from .netiface import IFACE_AUTO, CIfaceError
 
 # HomeKit setup codes are eight digits, and the 3-2-3 grouping is not
@@ -68,7 +68,19 @@ def main() -> None:
 		"--browse",
 		type=float,
 		default=5.0,
-		help="seconds to browse for devices at startup (default: 5)",
+		help=(
+			"seconds to wait for devices before first serving (default: 5). "
+			"discovery keeps running afterwards; this only decides how long to "
+			"hold off so the usual case comes up already populated"
+		),
+	)
+	parser.add_argument(
+		"--require-devices",
+		action="store_true",
+		help=(
+			"exit nonzero if no device answered within --browse, instead of "
+			"serving an empty bridge and waiting for one to appear"
+		),
 	)
 	parser.add_argument(
 		"--poll-interval",
@@ -79,8 +91,12 @@ def main() -> None:
 	parser.add_argument(
 		"--persist-dir",
 		type=Path,
-		default=PERSIST_DIR_DEFAULT,
-		help=f"directory holding the HomeKit pairing state (default: {PERSIST_DIR_DEFAULT})",
+		default=None,
+		help=(
+			"directory holding the HomeKit pairing state (default: "
+			f"{PERSIST_DIR_SERVICE} when it exists and is writable, else "
+			"$XDG_STATE_HOME/wac-homekit, else ~/.local/state/wac-homekit)"
+		),
 	)
 	parser.add_argument(
 		"--port",
@@ -132,6 +148,7 @@ def main() -> None:
 				nPort=args.port,
 				strPincode=args.pincode,
 				strIface=args.interface,
+				fRequireDevices=args.require_devices,
 			)
 		)
 	except CIfaceError as exc:
@@ -143,7 +160,8 @@ def main() -> None:
 
 	except OSError as exc:
 		# Overwhelmingly a persist directory the process cannot create or
-		# write — /var/lib/wac-homekit needs either root or --persist-dir.
+		# write. The default resolution avoids that, so reaching here means
+		# an explicit --persist-dir that the process has no business in.
 
 		print(f"error: {exc}", file=sys.stderr)
 		nExit = 1
