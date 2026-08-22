@@ -79,19 +79,13 @@ POLL_RETRY = 1
 class CDevicePoll:  # tag = dpoll
 	"""One device's client and the accessories built from its fixtures."""
 
-	def __init__(self, client: CClient, *, strDisco: str, strDeviceId: str) -> None:
+	def __init__(self, client: CClient, *, strDeviceId: str) -> None:
 		self.client = client
 
-		# The mDNS instance name this device was discovered under, which is
-		# what a later discovery event names it by. Stable across a DHCP lease
-		# — the address in `client` is not, which is the whole point of
-		# keeping both.
-
-		self.strDisco = strDisco
-
-		# The device's own identifier, from its MAC. Stable across a rename
-		# too, so it is what catches the same transformer turning up under a
-		# second mDNS name.
+		# The device's own identifier, from its MAC. The bridge keys these by
+		# mDNS instance name, which is what survives a DHCP lease; this
+		# survives a rename as well, and is what catches one transformer
+		# turning up under two names.
 
 		self.strDeviceId = strDeviceId
 
@@ -222,7 +216,7 @@ class CBridge(Bridge):  # tag = bridge
 
 			return False
 
-		dpoll = CDevicePoll(client, strDisco=disco.strHost, strDeviceId=strDeviceId)
+		dpoll = CDevicePoll(client, strDeviceId=strDeviceId)
 
 		if not self._CFaccAdd(dpoll, snap):
 			g_log.warning("%s: no light fixtures, skipping", disco.strIp)
@@ -508,8 +502,20 @@ class CBridge(Bridge):  # tag = bridge
 			# poll already read it, so noticing costs a set comparison and no
 			# extra request. Batched per device: one config change however
 			# many fixtures a single device contributed.
+			#
+			# Guarded because building an accessory needs the snapshot to
+			# identify itself, which a device that answered but reported no
+			# MAC cannot do. That is worth a line in the log and nothing more
+			# — it must not be what ends the poll loop.
 
-			if self._CFaccAdd(dpoll, objResult):
+			try:
+				cFacc = self._CFaccAdd(dpoll, objResult)
+			except WacError as exc:
+				g_log.error("%s: could not add a new fixture: %s", dpoll.client.strHost, exc)
+
+				continue
+
+			if cFacc:
 				self._ConfigChanged()
 
 	def setup_message(self) -> None:
