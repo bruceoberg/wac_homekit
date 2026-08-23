@@ -251,6 +251,17 @@ yet, by someone who has not read any of this.
   arithmetic on data in hand. Addresses already declined are remembered in
   `setNAddrSkip`, which is what keeps the "not a light" line to one per
   fixture instead of one every five seconds forever.
+- **Added and Updated are the same event to this bridge.** Which one mDNS
+  calls an announcement depends only on whether the watcher still held a
+  cached record, and a power cycle destroys that cache — the device goes away,
+  its record is dropped, and it returns as an *Added* while the bridge has
+  been holding a client for it the whole time. An earlier cut trusted that
+  distinction and routed Added straight to `FTryAddDevice`, whose
+  already-bridged guard returned early: a transformer rebooting onto a new
+  lease would have stayed stranded on its old address forever, which is the
+  exact failure the watch exists to prevent. `OnDeviceSeen` decides
+  add-versus-follow from the bridge's own state instead, which knows what it
+  is holding.
 - **A device's IP is followed, never rebuilt around.** `mpStrDpoll` is keyed
   by mDNS instance name precisely because that is the part that does not move;
   a lease change re-announces the same name at a new address and

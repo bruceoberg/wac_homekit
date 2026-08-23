@@ -179,6 +179,11 @@ class CBridge(Bridge):  # tag = bridge
 		"""
 
 		if disco.strHost in self.mpStrDpoll:
+			# A backstop, not the real guard. `OnDeviceSeen` decides
+			# add-versus-follow before getting here, and it is the one that
+			# knows a re-announcement of a bridged device may carry a new
+			# address. Reaching this line means a caller skipped that.
+
 			g_log.debug("%s: already bridged", disco.strHost)
 
 			return False
@@ -382,11 +387,8 @@ class CBridge(Bridge):  # tag = bridge
 		"""
 
 		match devent.discok:
-			case DISCOK.Added:
-				await self.FTryAddDevice(devent.disco)
-
-			case DISCOK.Updated:
-				await self._OnDeviceMoved(devent.disco)
+			case DISCOK.Added | DISCOK.Updated:
+				await self.OnDeviceSeen(devent.disco)
 
 			case DISCOK.Removed:
 				# Advisory, and acted on by doing nothing. An mDNS goodbye is
@@ -406,36 +408,45 @@ class CBridge(Bridge):  # tag = bridge
 
 				g_log.debug("%s: mDNS says gone; leaving it to the poll", devent.disco.strHost)
 
-	async def _OnDeviceMoved(self, disco: SDisco) -> None:
-		"""Follow a device whose advertisement changed — nearly always its IP.
+	async def OnDeviceSeen(self, disco: SDisco) -> None:
+		"""Bridge a device, or follow one already bridged to where it now is.
 
-		A DHCP lease change is the case this exists for. Without it the poll
-		loop keeps talking to an address the device no longer has, forever,
-		and every light on it reads as No Response until the bridge is
-		restarted.
+		Added and Updated land here together, deliberately. Which of the two
+		mDNS calls an announcement depends only on whether the watcher still
+		held a cached record — and a power cycle reliably destroys that cache:
+		the device goes away, its record is dropped, and it comes back as an
+		*Added* even though this bridge has been holding a client for it the
+		whole time. Trusting that distinction would leave a transformer that
+		rebooted onto a new DHCP lease stranded on its old address forever,
+		which is the exact failure this watch exists to prevent.
 
-		The client is re-pointed rather than rebuilt, and the accessories are
-		left completely alone: they are what iOS paired with, and their AIDs,
-		their names and their current values all have to survive a move that
-		the user never even sees.
+		So the add-versus-follow decision comes from the bridge's own state,
+		which knows what it is holding, rather than from mDNS's opinion of
+		what is new.
 		"""
 
 		dpoll = self.mpStrDpoll.get(disco.strHost)
 
 		if dpoll is None:
-			# An update for something never bridged is an add that did not
-			# take — a device that was unreachable the first time round, most
-			# likely. Its re-announcement is the second chance.
+			# Never bridged, or bridged and then dropped for having no lights.
+			# Either way the announcement is its next chance — a device that
+			# was simply unreachable the first time round gets picked up here.
 
 			await self.FTryAddDevice(disco)
 
 			return
 
 		if not disco.strIp or disco.strIp == dpoll.client.strHost:
-			# Something else moved: a firmware version after an OTA, say.
-			# Nothing here is built on any of it.
+			# Already pointed at the right place. An announcement that moved
+			# something else — a firmware version after an OTA, say — lands
+			# here too, and nothing the bridge holds is built on any of it.
 
 			return
+
+		# Re-pointed rather than rebuilt, and the accessories are left
+		# completely alone: they are what iOS paired with, and their AIDs,
+		# their names and their current values all have to survive a move the
+		# user never even sees.
 
 		g_log.info("%s: moved to %s", disco.strHost, disco.strIp)
 
