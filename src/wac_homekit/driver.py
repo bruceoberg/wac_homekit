@@ -715,10 +715,15 @@ def PrintSetupCode(strPincode: str, strXhmUri: str | None) -> None:
 	the digits are printed before anything can go wrong with it, and a
 	failure falls back to printing the URI as text.
 
-	Printed on every startup rather than only the first. The code is stable
-	once generated — HAP-python persists it with the rest of the state — and
-	under systemd this is what makes `journalctl -u wac-homekit` enough to
-	pair with, without a file to go and read.
+	Printed on every startup rather than only the first, which under systemd
+	is what makes `journalctl -u wac-homekit` enough to pair with without a
+	file to go and read.
+
+	Note the code is *not* stable across restarts: HAP-python persists the
+	keypair and the paired clients but neither the pincode nor the setup id,
+	so an unpaired restart without `--pincode` prints a fresh code and a
+	fresh QR. After pairing it stops mattering — pairing is keyed on the
+	keypair, not on the code.
 	"""
 
 	strDigits = strPincode.replace("-", "")

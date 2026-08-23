@@ -281,11 +281,31 @@ yet, by someone who has not read any of this.
   a blind first run die on mkdir. Whichever is chosen is logged at info,
   because pairing state is the one file a user may need to go and find.
 
+  **Changing this directory is indistinguishable from replacing the bridge.**
+  The HAP MAC lives in that file, and iOS knows the bridge by it — point the
+  process at a different directory and the Home app sees a stranger while
+  every paired accessory sits at No Response waiting for a bridge that never
+  comes back. It bit this repo's own bridge the first time the default moved:
+  paired against `private/hap`, restarted on the new default, two paired
+  clients stranded. Nothing was lost — the old file was untouched and naming
+  it again restored everything — but the symptom looks exactly like a broken
+  bridge, so check the `pairing state in ...` line before believing anything
+  else.
+
 ### Pairing presentation
 
-- **The setup code is printed on every startup**, not only the first. It is
-  stable once generated, and under systemd this is what makes
-  `journalctl -u wac-homekit` sufficient to pair with.
+- **The setup code is printed on every startup**, not only the first — which
+  is what makes `journalctl -u wac-homekit` sufficient to pair with under
+  systemd, without a file to go and read.
+
+  It is *not* stable across restarts, and nothing here should imply it is.
+  Measured on a real state file: neither `pincode` nor `setup_id` is among
+  the keys the encoder writes, so an unpaired restart without `--pincode`
+  generates a fresh code — and a fresh X-HM URI and QR code with it. This is
+  the same fact recorded under "What HAP-python actually requires"; it is
+  repeated here because the QR makes it look like a stable artifact and it is
+  not. After pairing it stops mattering, since pairing is keyed on the
+  persisted keypair rather than on the code.
 - **The QR code is rendered here, not by HAP-python.** `Accessory.xhm_uri()`
   looks like the thing to call and is unusable without the
   `HAP-python[QRCode]` extra: `base36` is imported only under HAP-python's own
