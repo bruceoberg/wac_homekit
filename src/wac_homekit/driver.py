@@ -713,7 +713,13 @@ def PrintQrXhm(strXhmUri: str) -> None:
 	qr.print_ascii(invert=True)
 
 
-def PrintSetupCode(strPincode: str, strXhmUri: str | None, *, cClientPaired: int) -> None:
+def PrintSetupCode(
+	strPincode: str,
+	strXhmUri: str | None,
+	*,
+	cClientPaired: int,
+	pathPersist: Path,
+) -> None:
 	"""Show how to pair with this bridge, or why there is nothing to show.
 
 	**A paired accessory cannot be paired again from its setup code.** It
@@ -749,9 +755,16 @@ def PrintSetupCode(strPincode: str, strXhmUri: str | None, *, cClientPaired: int
 	"""
 
 	if cClientPaired:
+		# The recovery path names the file outright rather than pointing at
+		# the log line above it. Someone reading this is looking at a bridge
+		# that will not pair and has just been told why; making them go and
+		# find the path is the last thing that should stand in their way.
+
 		print(f"paired with {cClientPaired} controller(s) — no setup code applies")
-		print("to pair another, add it from a controller already paired with this bridge;")
-		print("to start over, stop the bridge and delete its state file (see the log line above)")
+		print("to pair another, add it from a controller already paired with this bridge.")
+		print("if no controller has it any more — removed from the Home app while this")
+		print("bridge was not running, so the removal never reached it — start over with:")
+		print(f"    rm {pathPersist}")
 
 		return
 
@@ -940,6 +953,7 @@ async def NRun(
 			driver.state.pincode.decode(),
 			StrTryXhmUri(bridge),
 			cClientPaired=len(driver.state.paired_clients),
+			pathPersist=pathPersistDir / PERSIST_FILE,
 		)
 
 		try:

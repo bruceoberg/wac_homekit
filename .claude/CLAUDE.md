@@ -335,17 +335,25 @@ yet, by someone who has not read any of this.
   one already paired — so a code printed then is a trap rather than a
   redundancy.
 
-  The case that makes this worth code rather than a comment: **deleting a
-  bridge in the Home app does not reliably unpair the accessory.** Measured
-  here — both paired clients were still in the persist file afterwards, and
-  the bridge went on advertising `sf=0` while the phone believed it was gone
-  and ready to re-pair. Scanning the QR then fails as *"Accessory Not
-  Found"*, which names the wrong problem: iOS found the bridge, matched its
-  setup hash, and was refused. `dns-sd -L "WAC Lighting <mac-tail>" _hap._tcp
-  local` shows `sf` directly and is the fastest way to tell the two apart.
-  Recovering means stopping the bridge and deleting its state file, which
-  costs a new HAP MAC — free, since the controller has already forgotten the
-  old one.
+  The case that makes this worth code rather than a comment: **removing a
+  bridge from the Home app while the bridge is not running leaves it paired
+  forever.** iOS unpairs by sending `RemovePairing` over a HAP connection, so
+  with nothing listening there is nowhere to deliver it — it drops the bridge
+  from its own database and moves on. Measured here: both paired clients
+  still in the persist file afterwards, the bridge still advertising `sf=0`,
+  and the phone convinced it was gone and ready to re-pair.
+
+  So **delete from the Home app with the bridge running.** That is the whole
+  prevention, and it is worth more than any recovery feature.
+
+  The symptom is worth recognising because it names the wrong problem:
+  scanning the QR fails as *"Accessory Not Found"* when iOS in fact found the
+  bridge, matched its setup hash, and was refused for being paired already.
+  `dns-sd -L "WAC Lighting <mac-tail>" _hap._tcp local` shows `sf` directly
+  and settles it in one command. Recovery is stopping the bridge and deleting
+  its state file, which costs a new HAP MAC — free, since by then no
+  controller remembers the old one. `PrintSetupCode` prints that `rm` line
+  itself rather than making anyone go and find the path.
 - `invert=True` on `print_ascii`, because the quiet zone has to read as the
   light side — correct on the dark terminal a shell or `journalctl` normally
   is.
