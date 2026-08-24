@@ -329,6 +329,23 @@ yet, by someone who has not read any of this.
   installing an extra for a feature this bridge already has.
 - **The digits print before the QR can fail.** The QR is additive; a rendering
   failure logs at debug and falls back to printing the URI as text.
+- **A paired bridge prints no setup code at all**, and says how many
+  controllers it is paired with instead. A paired accessory advertises
+  `sf=0`, refuses `/pair-setup`, and accepts further controllers only through
+  one already paired — so a code printed then is a trap rather than a
+  redundancy.
+
+  The case that makes this worth code rather than a comment: **deleting a
+  bridge in the Home app does not reliably unpair the accessory.** Measured
+  here — both paired clients were still in the persist file afterwards, and
+  the bridge went on advertising `sf=0` while the phone believed it was gone
+  and ready to re-pair. Scanning the QR then fails as *"Accessory Not
+  Found"*, which names the wrong problem: iOS found the bridge, matched its
+  setup hash, and was refused. `dns-sd -L "WAC Lighting <mac-tail>" _hap._tcp
+  local` shows `sf` directly and is the fastest way to tell the two apart.
+  Recovering means stopping the bridge and deleting its state file, which
+  costs a new HAP MAC — free, since the controller has already forgotten the
+  old one.
 - `invert=True` on `print_ascii`, because the quiet zone has to read as the
   light side — correct on the dark terminal a shell or `journalctl` normally
   is.

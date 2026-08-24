@@ -713,29 +713,47 @@ def PrintQrXhm(strXhmUri: str) -> None:
 	qr.print_ascii(invert=True)
 
 
-def PrintSetupCode(strPincode: str, strXhmUri: str | None) -> None:
-	"""Show every way there is to pair with this bridge.
+def PrintSetupCode(strPincode: str, strXhmUri: str | None, *, cClientPaired: int) -> None:
+	"""Show how to pair with this bridge, or why there is nothing to show.
 
-	The digits first, and grouped twice: HAP-python prints them 3-2-3, which
-	is the format the protocol hashes, while the Home app's manual entry
-	offers two groups of four. Printing both saves regrouping eight digits by
-	eye at the exact moment a mistyped one reads as a pairing failure.
+	**A paired accessory cannot be paired again from its setup code.** It
+	advertises `sf=0`, refuses `/pair-setup`, and takes further controllers
+	only through one already paired — which is what the Home app does when
+	it adds a hub or a family member. So once `paired_clients` is non-empty
+	the code and the QR are not merely redundant, they are a trap: a
+	controller pointed at them fails with a message ("Accessory Not Found")
+	that names the wrong problem entirely.
 
-	Then the same code as a QR, which is what pairing actually looks like on
-	a phone — point the camera, done. It is additive and never load-bearing:
-	the digits are printed before anything can go wrong with it, and a
-	failure falls back to printing the URI as text.
+	This is not hypothetical, and the orphan case is the nasty one. Deleting
+	a bridge in the Home app removes it from *iOS's* database and does not
+	reliably tell the accessory — measured here, with both paired clients
+	still in the persist file afterwards. From the phone the bridge looks
+	gone and ready to re-pair; from the bridge it is still paired and
+	refusing. The line below is what makes those two views comparable
+	without a packet capture.
 
-	Printed on every startup rather than only the first, which under systemd
-	is what makes `journalctl -u wac-homekit` enough to pair with without a
-	file to go and read.
+	When there is a code worth showing, the digits come first and grouped
+	twice: HAP-python prints them 3-2-3, which is the format the protocol
+	hashes, while the Home app's manual entry offers two groups of four.
+	Printing both saves regrouping eight digits by eye at the exact moment a
+	mistyped one reads as a pairing failure. The QR follows, and is additive
+	— the digits are on screen before anything about rendering it can go
+	wrong.
 
 	Note the code is *not* stable across restarts: HAP-python persists the
 	keypair and the paired clients but neither the pincode nor the setup id,
 	so an unpaired restart without `--pincode` prints a fresh code and a
-	fresh QR. After pairing it stops mattering — pairing is keyed on the
-	keypair, not on the code.
+	fresh QR. Which is exactly why this prints on every startup — under
+	systemd it makes `journalctl -u wac-homekit` enough to pair with, with no
+	file to go and read.
 	"""
+
+	if cClientPaired:
+		print(f"paired with {cClientPaired} controller(s) — no setup code applies")
+		print("to pair another, add it from a controller already paired with this bridge;")
+		print("to start over, stop the bridge and delete its state file (see the log line above)")
+
+		return
 
 	strDigits = strPincode.replace("-", "")
 
@@ -918,7 +936,11 @@ async def NRun(
 
 		await driver.async_start()
 
-		PrintSetupCode(driver.state.pincode.decode(), StrTryXhmUri(bridge))
+		PrintSetupCode(
+			driver.state.pincode.decode(),
+			StrTryXhmUri(bridge),
+			cClientPaired=len(driver.state.paired_clients),
+		)
 
 		try:
 			await evStop.wait()
