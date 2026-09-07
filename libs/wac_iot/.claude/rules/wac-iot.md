@@ -439,9 +439,14 @@ control was a real user toggle that never reached the hardware.
 
   Consequences for a consumer: **polling faster buys nothing** for a change
   made through a group, so do not present a poll interval as the latency a
-  user will see, and do not shorten it hoping to improve that. Reading
-  `/group` state instead of per-fixture state might be fresher — unmeasured,
-  and the obvious next experiment if this ever matters.
+  user will see, and do not shorten it hoping to improve that.
+
+  **Reading the group instead does not help**, which was the obvious idea and
+  is worth not re-deriving: `/group` action 3 returns membership only — the
+  fixture addresses, the name, the address — and carries no `state` at all. A
+  group is a target for writes, not a holder of state. There is nothing
+  fresher to read, so the per-fixture lag is simply the latency this
+  interface offers for group-originated change.
 - Group address 255 is a built-in "All-Default" group. It holds every *real*
   fixture, but not the type-4 pseudo-fixture above — do not treat its
   membership as equivalent to the action 5 address list.
