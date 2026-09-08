@@ -27,6 +27,7 @@ from typing import Any, TextIO
 from pyhap.accessory import Accessory, Bridge
 from pyhap.accessory_driver import AccessoryDriver
 from pyhap.encoder import AccessoryEncoder
+from pyhap.hap_handler import HAPServerHandler
 
 from wac_iot import DISCOK, CClient, CSnapshot, CWatcher, SDevent, SDisco, WacError
 
@@ -736,7 +737,8 @@ def PrintSetupCode(
 	still in the persist file afterwards. From the phone the bridge looks
 	gone and ready to re-pair; from the bridge it is still paired and
 	refusing. The line below is what makes those two views comparable
-	without a packet capture.
+	without a packet capture, and the `--unpair` line below is what gets
+	someone out of it without going near the state file.
 
 	When there is a code worth showing, the digits come first and grouped
 	twice: HAP-python prints them 3-2-3, which is the format the protocol
@@ -762,9 +764,11 @@ def PrintSetupCode(
 
 		print(f"paired with {cClientPaired} controller(s) — no setup code applies")
 		print("to pair another, add it from a controller already paired with this bridge.")
-		print("if no controller has it any more — removed from the Home app while this")
-		print("bridge was not running, so the removal never reached it — start over with:")
-		print(f"    rm {pathPersist}")
+		print()
+		print("if no controller has it any more — deleted from the Home app while this")
+		print("bridge was not running, so the removal never reached it — nothing here can")
+		print("notice: iOS does not contact a bridge that says it is paired. restart with")
+		print("--unpair to forget them, and this prints a setup code instead of this.")
 
 		return
 
@@ -863,6 +867,122 @@ def StrTryXhmUri(bridge: CBridge) -> str | None:
 		return None
 
 
+def CUnpairAll(driver: AccessoryDriver) -> int:
+	"""Forget every paired controller. Returns how many there were.
+
+	Through `driver.unpair` rather than at the state directly, so the persist
+	file is rewritten by the same path an ordinary removal takes. One at a
+	time and re-read each round, because removing the last admin clears the
+	rest from under the loop.
+
+	The MAC and the keypair are left alone, which is the whole reason this
+	exists rather than `rm`: the bridge keeps its identity and loses only the
+	controllers that no longer exist.
+	"""
+
+	cClient = len(driver.state.paired_clients)
+
+	while driver.state.paired_clients:
+		driver.unpair(next(iter(driver.state.paired_clients)))
+
+	return cClient
+
+
+class CPairingWatch:  # tag = pwat
+	"""Makes a bridge that has just become unpaired say so, and mean it.
+
+	iOS unpairs by sending `RemovePairing` over a HAP connection, and
+	HAP-python handles that correctly — clears the client, re-advertises
+	`sf=1`. What it does not do is leave the bridge usable: the setup code was
+	withheld at startup because the bridge was paired at the time, so it now
+	sits there pairable and mute, and the sessions opened under the pairing
+	that just vanished are still open. This closes both gaps, and it is the
+	whole of what a *running* bridge can do about being deleted.
+
+	**A bridge that was not running when it was deleted cannot be helped from
+	here, and that is measured, not assumed.** iOS never contacts an accessory
+	advertising `sf=0` — not to pair with it, not to be refused by it. Typing
+	its setup code into the Home app produced no TCP connection at all, twice,
+	against a real orphaned bridge on the same LAN. So there is no request to
+	notice, and no in-band evidence that a pairing has gone stale. Recovery is
+	`--unpair`, which is a person deciding — see `CUnpairAll`.
+
+	Installed by wrapping `HAPServerHandler.handle_pairings`, which is the
+	only seam available: the removal is handled inside the handler and the
+	driver is told nothing that distinguishes it from any other unpair.
+	Wrapping the method rather than subclassing the class keeps this to the
+	one entry point that can leave the bridge unpaired, and survives
+	HAP-python building handlers wherever it likes. It runs on the event loop,
+	so the persist and the advertisement update are safe to reach from here.
+	"""
+
+	def __init__(self, bridge: CBridge, *, pathPersist: Path) -> None:
+		self.bridge = bridge
+
+		# Named only to be printed in the recovery advice, but printed at the
+		# one moment someone needs it.
+
+		self.pathPersist = pathPersist
+
+	def Install(self) -> None:
+		"""Wrap the handler method. Called once, for the life of the process."""
+
+		fnPairings = HAPServerHandler.handle_pairings
+
+		def HandlePairings(handler: Any) -> None:
+			fPaired = handler.state.paired
+
+			fnPairings(handler)
+
+			# Only the transition, and only the last one out. Dropping one
+			# controller of several is not a bridge coming free, and
+			# HAP-python re-advertises for that case by itself.
+
+			if fPaired and not handler.state.paired:
+				self._OnUnpaired(handler.client_address)
+
+		HAPServerHandler.handle_pairings = HandlePairings
+
+	def _OnUnpaired(self, tplPeerKeep: tuple[str, int]) -> None:
+		"""Announce that this bridge is pairable again, and say how."""
+
+		g_log.warning("no longer paired with any controller — pairable again")
+
+		self._CloseOther(tplPeerKeep)
+
+		PrintSetupCode(
+			self.bridge.driver.state.pincode.decode(),
+			StrTryXhmUri(self.bridge),
+			cClientPaired=0,
+			pathPersist=self.pathPersist,
+		)
+
+	def _CloseOther(self, tplPeerKeep: tuple[str, int]) -> None:
+		"""Close every HAP connection except the one being answered.
+
+		A session outlives the pairing it was established under — its keys are
+		the session's, not the pairing's — so a controller that has just been
+		unpaired goes on reading and writing until something happens to drop
+		the socket. That is the "it still thinks it has a connection" half of
+		this: the pairing is gone but the conversation is not.
+
+		The connection being answered is spared. It still has a response to
+		send, and closing it would abort the very remove-pairing that got us
+		here. Closing is clean — HAP-python's `connection_lost` unsubscribes
+		the peer from its event topics on the way out.
+		"""
+
+		mpPeerProto = self.bridge.driver.http_server.connections
+
+		for tplPeer, proto in list(mpPeerProto.items()):
+			if tplPeer == tplPeerKeep:
+				continue
+
+			g_log.info("dropping the HAP connection from %s", tplPeer)
+
+			proto.close()
+
+
 async def NRun(
 	*,
 	dTBrowse: float,
@@ -872,6 +992,7 @@ async def NRun(
 	strPincode: str | None,
 	strIface: str,
 	fRequireDevices: bool,
+	fUnpair: bool = False,
 ) -> int:
 	"""Discover, bridge, serve, and shut down cleanly. Returns an exit code.
 
@@ -946,6 +1067,24 @@ async def NRun(
 			loop.add_signal_handler(sig, evStop.set)
 
 		taskWatch = asyncio.create_task(bridge.WatchAsync(watcher))
+
+		pwat = CPairingWatch(bridge, pathPersist=pathPersistDir / PERSIST_FILE)
+
+		# Installed before the server accepts anything, so the first request of
+		# the run is already covered.
+
+		pwat.Install()
+
+		# Cleared before the driver starts, so the very first advertisement
+		# goes out as `sf=1`. Doing it after would announce the bridge as
+		# paired and then correct it, and a controller that heard only the
+		# first announcement would go on ignoring a bridge that is waiting for
+		# it.
+
+		if fUnpair:
+			cClientForgotten = CUnpairAll(driver)
+
+			g_log.warning("--unpair: forgot %d paired controller(s)", cClientForgotten)
 
 		await driver.async_start()
 

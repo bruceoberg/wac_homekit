@@ -5,6 +5,7 @@ from __future__ import annotations  # Forward refs without quotes
 
 import argparse
 import asyncio
+import io
 import logging
 import re
 import sys
@@ -114,6 +115,16 @@ def main() -> None:
 		),
 	)
 	parser.add_argument(
+		"--unpair",
+		action="store_true",
+		help=(
+			"forget every paired controller at startup and serve as an unpaired "
+			"bridge, printing a setup code. for a bridge deleted from the Home "
+			"app while it was not running, which leaves it paired to controllers "
+			"that no longer exist and invisible to the app"
+		),
+	)
+	parser.add_argument(
 		"--interface",
 		default=IFACE_AUTO,
 		metavar="IFACE",
@@ -139,6 +150,19 @@ def main() -> None:
 		datefmt="%H:%M:%S",
 	)
 
+	# The setup code goes to stdout, and stdout is a pipe under systemd or
+	# behind any redirect — where Python's default is to block-buffer it.
+	# Measured: the whole pairing block, digits and QR, sat in the buffer while
+	# the bridge ran, which is precisely as useful as not printing it. Logging
+	# goes to stderr and was unaffected, so the failure looks like the code was
+	# never printed at all rather than like buffering.
+	#
+	# Line buffering rather than a flush at each print: the reset prints a code
+	# mid-run too, and anything added later should not have to remember.
+
+	if isinstance(sys.stdout, io.TextIOWrapper):
+		sys.stdout.reconfigure(line_buffering=True)
+
 	try:
 		nExit = asyncio.run(
 			NRun(
@@ -149,6 +173,7 @@ def main() -> None:
 				strPincode=args.pincode,
 				strIface=args.interface,
 				fRequireDevices=args.require_devices,
+				fUnpair=args.unpair,
 			)
 		)
 	except CIfaceError as exc:

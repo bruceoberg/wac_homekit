@@ -8,12 +8,20 @@ harness would only be testing HAP-python.
 from __future__ import annotations  # Forward refs without quotes
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from uuid import UUID, uuid4
 
 import pytest
+
+from pyhap.hap_handler import HAPServerHandler
+from pyhap.state import State
 
 from wac_homekit.driver import (
 	PERSIST_DIR_NAME,
 	XHM_PREFIX,
+	CPairingWatch,
+	CUnpairAll,
 	PathPersistResolve,
 	StrBase36,
 	StrXhmUri,
@@ -189,3 +197,181 @@ class TestStrXhmUri:
 		strUri = StrXhmUri(0, "00000001", "ZZZZ")
 
 		assert strUri == f"{XHM_PREFIX}0004FTI4HZZZZ"
+
+
+class CProtoStub:  # tag = proto
+	"""One HAP connection, which remembers only whether it was closed."""
+
+	def __init__(self) -> None:
+		self.fClosed = False
+
+	def close(self) -> None:
+		self.fClosed = True
+
+
+class CDriverStub:  # tag = driver
+	"""AccessoryDriver as far as the pairing code reaches into it.
+
+	`unpair` is HAP-python's own minus the persist, which needs a running
+	loop and a file; the count stands in for it, since what matters here is
+	that removal went through the driver rather than at the state directly.
+	"""
+
+	def __init__(self, state: State) -> None:
+		self.state = state
+		self.cUnpair = 0
+		self.http_server: Any = SimpleNamespace(connections={})
+
+	def unpair(self, uuidClient: UUID) -> None:
+		self.state.remove_paired_client(uuidClient)
+		self.cUnpair += 1
+
+
+class CBridgeStub:  # tag = bridge
+	"""The two attributes StrTryXhmUri and the watch actually use."""
+
+	def __init__(self, driver: CDriverStub) -> None:
+		self.driver = driver
+		self.category = CATEGORY_BRIDGE
+
+
+class CHandlerStub:  # tag = handler
+	"""A HAPServerHandler mid-request."""
+
+	def __init__(self, state: State) -> None:
+		self.state = state
+		self.client_address = ("10.0.0.9", 50000)
+		self.response: Any = SimpleNamespace(pairing_changed=False)
+
+
+def StatePaired(cClient: int = 2) -> State:
+	state = State(address="127.0.0.1", mac="AA:BB:CC:DD:EE:FF", pincode=b"111-22-333")
+
+	for _ in range(cClient):
+		# Admin permissions, which is what iOS pairs with and what makes
+		# removing the last one cascade.
+
+		state.add_paired_client(str(uuid4()).encode(), b"\x00" * 32, b"\x01")
+
+	return state
+
+
+class TestCUnpairAll:
+	"""`--unpair`, which is the only recovery a deleted-while-down bridge has.
+
+	Measured, and the reason this is a flag rather than something automatic:
+	iOS never contacts an accessory advertising `sf=0`, so a bridge holding
+	controllers that no longer exist gets no request to notice — not even a
+	refused one.
+	"""
+
+	def test_forgets_everyone_and_says_how_many(self) -> None:
+		state = StatePaired(cClient=2)
+		driver = CDriverStub(state)
+
+		assert CUnpairAll(driver) == 2  # type: ignore[arg-type]
+		assert not state.paired
+		assert not state.paired_clients
+
+	def test_goes_through_the_driver(self) -> None:
+		"""So the persist file is rewritten by the path an ordinary removal
+		takes, rather than the state being edited underneath it."""
+
+		driver = CDriverStub(StatePaired(cClient=1))
+
+		CUnpairAll(driver)  # type: ignore[arg-type]
+
+		assert driver.cUnpair == 1
+
+	def test_an_unpaired_bridge_is_a_no_op(self) -> None:
+		driver = CDriverStub(StatePaired(cClient=0))
+
+		assert CUnpairAll(driver) == 0  # type: ignore[arg-type]
+		assert not driver.cUnpair
+
+
+class TestCPairingWatch:
+	"""What a *running* bridge does when its last controller removes it.
+
+	Stubbed rather than driven through a real driver: what is worth testing
+	is the decision — when the bridge counts as free, and what is left
+	running afterwards — and none of that is HAP-python's.
+	"""
+
+	def PwatBuild(self, state: State, tmp_path: Path) -> tuple[CPairingWatch, CDriverStub]:
+		driver = CDriverStub(state)
+		bridge = CBridgeStub(driver)
+
+		return CPairingWatch(bridge, pathPersist=tmp_path / "state.json"), driver  # type: ignore[arg-type]
+
+	def test_a_removal_that_empties_the_bridge_announces_it(
+		self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+	) -> None:
+		"""It is pairable again, and the code was withheld at startup because
+		it was paired then — so without this it sits there mute."""
+
+		state = StatePaired(cClient=1)
+		pwat, _ = self.PwatBuild(state, tmp_path)
+
+		def HandlePairings(handler: Any) -> None:
+			state.remove_paired_client(next(iter(state.paired_clients)))
+
+		monkeypatch.setattr(HAPServerHandler, "handle_pairings", HandlePairings)
+
+		pwat.Install()
+		HAPServerHandler.handle_pairings(CHandlerStub(state))
+
+		assert "1112 2333" in capsys.readouterr().out
+
+	def test_a_removal_leaving_a_controller_says_nothing(
+		self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+	) -> None:
+		"""Dropping one of several controllers is not a bridge coming free."""
+
+		state = StatePaired(cClient=2)
+		pwat, _ = self.PwatBuild(state, tmp_path)
+
+		def HandlePairings(handler: Any) -> None:
+			# Straight off the state, so the last-admin cascade in
+			# `remove_paired_client` does not take the other one with it.
+
+			state.paired_clients.pop(next(iter(state.paired_clients)))
+
+		monkeypatch.setattr(HAPServerHandler, "handle_pairings", HandlePairings)
+
+		pwat.Install()
+		HAPServerHandler.handle_pairings(CHandlerStub(state))
+
+		assert state.paired
+		assert not capsys.readouterr().out
+
+	def test_other_connections_are_dropped_but_not_the_asker(
+		self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+	) -> None:
+		"""A session outlives the pairing it was made under, so a controller
+		that was just unpaired would go on talking. The one being answered is
+		spared — it still has a response to send."""
+
+		state = StatePaired(cClient=1)
+		pwat, driver = self.PwatBuild(state, tmp_path)
+		handler = CHandlerStub(state)
+
+		protoAsker = CProtoStub()
+		protoOther = CProtoStub()
+
+		driver.http_server.connections = {
+			handler.client_address: protoAsker,
+			("10.0.0.8", 50001): protoOther,
+		}
+
+		monkeypatch.setattr(
+			HAPServerHandler,
+			"handle_pairings",
+			lambda h: state.remove_paired_client(next(iter(state.paired_clients))),
+		)
+
+		pwat.Install()
+		HAPServerHandler.handle_pairings(handler)
+
+		assert not protoAsker.fClosed
+		assert protoOther.fClosed

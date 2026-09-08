@@ -141,8 +141,14 @@ button for a bridged accessory. That covers the last write path: every
 characteristic this bridge offers has now been driven from a HomeKit
 controller against real hardware.
 
+Pairing removal and recovery are now verified against a real Home app too:
+an orphaned bridge recovered with `--unpair` and re-added with all three
+lights, and a deletion made while the bridge was running handled
+automatically — see the pairing section for what each measurement settled.
+
 Still unexercised: any genuinely tunable-white fixture, there being none on
-this transformer.
+this transformer; and `_CloseOther`, since iOS had already closed its other
+connections before the removal arrived.
 
 ### What the device does that the bridge has to answer for
 
@@ -343,17 +349,91 @@ yet, by someone who has not read any of this.
   still in the persist file afterwards, the bridge still advertising `sf=0`,
   and the phone convinced it was gone and ready to re-pair.
 
-  So **delete from the Home app with the bridge running.** That is the whole
-  prevention, and it is worth more than any recovery feature.
+  So **delete from the Home app with the bridge running.** That is still the
+  cheapest prevention — it makes the whole thing automatic — but it is no
+  longer the only way out; `--unpair` is below.
 
-  The symptom is worth recognising because it names the wrong problem:
-  scanning the QR fails as *"Accessory Not Found"* when iOS in fact found the
-  bridge, matched its setup hash, and was refused for being paired already.
-  `dns-sd -L "WAC Lighting <mac-tail>" _hap._tcp local` shows `sf` directly
-  and settles it in one command. Recovery is stopping the bridge and deleting
-  its state file, which costs a new HAP MAC — free, since by then no
-  controller remembers the old one. `PrintSetupCode` prints that `rm` line
-  itself rather than making anyone go and find the path.
+  The symptom names the wrong problem, and the *refusal is the controller's,
+  not the bridge's*. Entering the setup code fails silently — straight back to
+  the "Select an Accessory" screen, no error — because iOS filters on `sf` and
+  never opens a socket; an earlier note here read the failure as the bridge
+  refusing a pairing it had in fact never been asked for. (Scanning the QR
+  reportedly gives *"Accessory Not Found"*, which is the same client-side
+  refusal wearing a message.) `dns-sd -L "WAC Lighting <mac-tail>" _hap._tcp
+  local` shows `sf` directly and settles it in one command.
+- **iOS does not contact a bridge that says it is paired — measured, twice.**
+  This is the fact the whole recovery story turns on, so it is recorded before
+  the design it dictates. With a real orphaned bridge on the LAN (real state
+  file, both phantom controllers, `sf=0`), typing its setup code into the Home
+  app produced **no TCP connection at all** — not a refused pairing, not an
+  error, just a silent return to the "Select an Accessory" screen. The add
+  flow filters on `sf` client-side and never opens a socket. Nothing
+  server-side can change that.
+
+  So **a bridge that was not running when it was deleted cannot detect it.**
+  There is no request to notice, no failed handshake to count, no in-band
+  evidence of any kind. An earlier cut of this took a `/pair-setup` M1 at a
+  paired bridge as proof the pairing was stale, cleared it, and let the same
+  request carry on into a pairing that could then succeed. It works — against
+  a HAP client that will talk to an `sf=0` accessory. iOS will not, which
+  makes it dead code carrying a live risk (any process on the LAN could drop
+  the bridge's pairings by posting one packet), so it was removed. Do not
+  rebuild it without first re-measuring the silence above.
+- **`--unpair` is the recovery, and it is a person deciding.** It forgets
+  every paired controller at startup, before the driver starts, so the first
+  advertisement goes out as `sf=1` — announcing paired and then correcting it
+  would leave a controller that heard only the first announcement ignoring a
+  bridge that is waiting for it. It keeps the MAC and the keypair, which is
+  the whole reason it exists rather than `rm`: the bridge loses only the
+  controllers that no longer exist. Verified on the real bridge: two phantom
+  clients forgotten, `sf=1`, code and QR printed, and the Home app added all
+  three lights on the first try.
+
+  The paired-bridge startup message names that flag now, and says outright
+  that nothing here can notice the deletion — because the previous wording
+  sent someone hunting for a state file, and the one before that implied the
+  bridge would work it out by itself.
+- **Deleted while the bridge is *running* is fully automatic**, and that is
+  the case a bridge running as a service actually hits. iOS sends
+  `RemovePairing`, HAP-python clears the client and re-advertises, and
+  `CPairingWatch` supplies what is missing: the setup code, which was withheld
+  at startup because the bridge was paired then, so without it the bridge sits
+  there pairable and mute. Verified end to end — deletion from a real Home
+  app, one `Unpairing` line, the code and QR printed unprompted, `sf=1`, and
+  `paired_clients {}` in the persist file.
+
+  Note **one removal empties a bridge with several controllers**: iOS pairs
+  the phone as admin and adds a home hub as a non-admin, and HAP-python's
+  `remove_paired_client` clears everyone once the last admin goes. So the
+  watch fires on the transition to zero, not per client — measured with an
+  iPhone plus a hub pairing.
+- **Sessions outlive the pairings they were made under.** The keys belong to
+  the session, not to the pairing, so a controller that has just been unpaired
+  could go on reading and writing until something drops the socket — the "it
+  still thinks it has a connection" half of the complaint. `_CloseOther` drops
+  every HAP connection but the one being answered, which is spared because it
+  still has a response to send. Note this stayed *unexercised* in the live
+  test: iOS had already closed its other connections by the time the removal
+  arrived, so the loop found nothing to drop. Insurance, not something
+  observed working.
+- **The seam is one wrapped `HAPServerHandler` method**, and there is no
+  other. The removal is handled inside the handler, and the driver is told
+  nothing that distinguishes it from any other unpair. Wrapping
+  `handle_pairings` rather than subclassing the class and rebinding it in
+  `hap_protocol` keeps the patch to the one entry point that can leave the
+  bridge unpaired, and survives HAP-python constructing handlers wherever it
+  likes. It runs on the event loop, so the persist is safe to reach from
+  there; the advertisement is HAP-python's own to update, which it does after
+  the response has gone out.
+- **stdout is line-buffered at startup, and that is load-bearing.** The setup
+  code is printed, not logged, and print goes to a pipe under systemd or any
+  redirect — where Python block-buffers it. Measured: the whole pairing block,
+  digits and QR, sat in the buffer for the life of the process while logging
+  (stderr) flowed normally, so the failure looks exactly like the code was
+  never printed. That defeats the "`journalctl` is enough to pair with" claim
+  above, and it would have swallowed the code `CPairingWatch` prints mid-run.
+  Line buffering rather than a flush per call site, so nothing added later has
+  to remember.
 - `invert=True` on `print_ascii`, because the quiet zone has to read as the
   light side — correct on the dark terminal a shell or `journalctl` normally
   is.
@@ -464,6 +544,11 @@ pure functions whose arithmetic is easy to get subtly wrong:
   exists to remove.
 - the X-HM setup payload, unpacked field by field rather than compared against
   a fixed string, which would pass just as happily with two fields transposed.
+- the unpair path: that `CUnpairAll` empties the bridge through the driver
+  rather than editing state underneath it, that a partial removal is not
+  mistaken for a bridge coming free, and that the connection being answered is
+  not among the ones dropped. The driver is stubbed — the decision is ours,
+  the mechanics are HAP-python's.
 
 The accessory and driver layers need a real device and a real Home app; a
 HAP-python test harness would only be testing HAP-python.
