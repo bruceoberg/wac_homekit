@@ -118,6 +118,52 @@ class CFixtures:  # tag = fixs
 	# about which fields may travel together live in one place instead of at
 	# every call site. Pick the method matching the fixture's type; anything
 	# not covered here still goes through `ObjControl` with a hand-built dict.
+	#
+	# They route through `_ObjControlOffLast` rather than `ObjControl` because
+	# one firmware quirk cannot be expressed in a single request at all — see
+	# its docstring. `ObjControl` stays what it says it is: one wire action,
+	# raw response.
+
+	async def _ObjControlOffLast(self, nAddr: int, objState: dict[str, Any]) -> dict[str, Any]:
+		"""Action 4, split in two when an explicit off travels with anything else.
+
+		Measured: `{red, green, blue, status: false}` sent to a fixture that
+		was on left it **on**. Writing colour or `level` turns a fixture on as
+		a side effect, and that implicit turn-on beats the explicit
+		`status: false` in the same body regardless of ordering. So a request
+		carrying an off alongside another field cannot be trusted to turn the
+		fixture off, and the only way to express it is two requests with the
+		off last.
+
+		The second response is the one returned: it describes the fixture's
+		final state, which is what a consumer folds back in.
+
+		Only that combination pays for the extra round trip. A lone
+		`status: false`, and anything not turning the fixture off, is one
+		request exactly as before. An explicit `status: true` alongside other
+		fields is also left alone — the device turns the fixture on for those
+		writes anyway, so there is no ordering to enforce.
+
+		**Errors propagate.** If the first request raises, the off is never
+		sent and the exception reaches the caller unchanged. Trying the off
+		anyway is the obvious thing to add here and is deliberately not done:
+		inventing an error policy inside this library is worse than a light
+		that stays on for one poll interval and then honestly reports itself
+		as on.
+		"""
+
+		if objState.get("status") is not False or len(objState) < 2:
+			return await self.ObjControl(nAddr, objState)
+
+		objRest = {
+			strField: objValue
+			for strField, objValue in objState.items()
+			if strField != "status"
+		}
+
+		await self.ObjControl(nAddr, objRest)
+
+		return await self.ObjControl(nAddr, {"status": False})
 
 	async def ControlLight(
 		self,
@@ -130,7 +176,7 @@ class CFixtures:  # tag = fixs
 	) -> dict[str, Any]:
 		"""Control a single color or ELV fixture (0, 6)."""
 
-		return await self.ObjControl(
+		return await self._ObjControlOffLast(
 			nAddr,
 			ObjStateLight(fOn=fOn, nLevel=nLevel, fFindme=fFindme, lightmode=lightmode),
 		)
@@ -148,7 +194,7 @@ class CFixtures:  # tag = fixs
 	) -> dict[str, Any]:
 		"""Control a tunable white fixture (1, 12, 14, 15)."""
 
-		return await self.ObjControl(
+		return await self._ObjControlOffLast(
 			nAddr,
 			ObjStateWhite(
 				fOn=fOn,
@@ -175,7 +221,7 @@ class CFixtures:  # tag = fixs
 	) -> dict[str, Any]:
 		"""Control an RGBW fixture (2)."""
 
-		return await self.ObjControl(
+		return await self._ObjControlOffLast(
 			nAddr,
 			ObjStateRgbw(
 				fOn=fOn,
@@ -202,7 +248,7 @@ class CFixtures:  # tag = fixs
 	) -> dict[str, Any]:
 		"""Control a fan (13)."""
 
-		return await self.ObjControl(
+		return await self._ObjControlOffLast(
 			nAddr,
 			ObjStateFan(
 				fOn=fOn,

@@ -164,13 +164,20 @@ code rather than settled by it:
   write, which would have let a stale belief turn off a light someone had
   just switched on at the wall.
 - **An explicit off loses to a colour write in the same request.** `{rgb...,
-  status: false}` left the light on. `_ControlAsync` builds exactly that body
-  when a batch carries On alongside Hue/Saturation, so turning a light off
-  from a scene that also sets its colour does not turn it off. **Still open.**
-  The fix is two requests with off last, which costs a second round trip on
-  every batch that carries On — worth doing only once the Home app is
-  observed sending that combination. The tile is at least honest in the
-  meantime, since the echoed state reports the light as on.
+  status: false}` left the light on, and `_ControlAsync` builds exactly that
+  body when a batch carries On alongside Hue/Saturation — so a scene that set
+  a colour and turned a light off did not turn it off. *Handled*, and handled
+  **in `wac_iot`, not here**: it is firmware behaviour rather than a HomeKit
+  quirk, and the library already has precedent for spending an extra request
+  to absorb one. The typed `Control*` methods route through
+  `_ObjControlOffLast`, which sends the colour, then the off alone, and
+  returns the second response. Nothing on this side changed: `_ControlAsync`
+  still awaits one call per tier and still reconciles from what comes back,
+  which is now the off's echoed state.
+
+  The second round trip is spent only on a batch that carries an explicit off
+  *with* something else — which, on the evidence, is only ever a scene. An
+  ordinary tap on the tile sends On by itself and costs exactly what it did.
 - **`mixColorTemp` works on RGBW fixtures and does *not* turn them on.**
   Handled — it is what the RGBW white point is now driven through. The
   firmware treats the two colour axes as mutually exclusive per request and

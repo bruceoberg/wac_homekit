@@ -140,6 +140,28 @@ only writes ever made to this hardware.
   on — the colour write's implicit turn-on wins regardless of ordering in the
   body. Turning a light off while also setting its colour takes two requests,
   off last.
+
+  **This library absorbs that**, the way `LFixtureReadAll` absorbs the broken
+  bulk read: every typed `Control*` method routes through
+  `_ObjControlOffLast`, which sends the state without `status`, then
+  `{"status": false}` on its own, and returns the *second* response — the one
+  describing where the fixture actually ended up. It is a firmware rule, not a
+  HomeKit one, so it belongs here rather than in any one consumer; a Home
+  Assistant integration hitting the same endpoint would otherwise hit the same
+  bug.
+
+  The extra round trip is spent only on a batch that carries an explicit off
+  with something else. A lone `status: false` is one request, and so is an
+  explicit `status: true` alongside anything — the device turns the fixture on
+  for those writes regardless, so there is no ordering to enforce.
+
+  **If the first request raises, the off is never sent and the error
+  propagates unchanged.** Deliberate, and worth not re-deriving: forcing the
+  off through anyway would be this library inventing an error policy for its
+  consumers. A light that stays on for one poll interval and then reports
+  itself honestly as on is the better failure.
+
+  `ObjControl` is untouched and stays raw — one wire action, one response.
 - **The action 4 response carries the fixture's full new `state`.** Undocumented,
   seen on both RGBW and ELV, and it agrees exactly with an immediate read —
   including across a ramped turn-on on a fixture with `onRate: 200`, so it is
