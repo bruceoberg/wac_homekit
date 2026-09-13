@@ -33,6 +33,7 @@ from wac_iot import DISCOK, CClient, CSnapshot, CWatcher, SDevent, SDisco, WacEr
 
 from .accessory import AID_MAX, AID_MIN, CFixtureAccessory, TierTryFromFixturek
 from .netiface import StrAddrResolve
+from .notify import CNotifier, SStatus
 
 g_log = logging.getLogger(__name__)
 
@@ -144,10 +145,22 @@ class CDevicePoll:  # tag = dpoll
 class CBridge(Bridge):  # tag = bridge
 	"""Every light on every discovered device, behind one HomeKit bridge."""
 
-	def __init__(self, driver: AccessoryDriver, *, dTPoll: float) -> None:
+	def __init__(
+		self,
+		driver: AccessoryDriver,
+		*,
+		dTPoll: float,
+		notifier: CNotifier | None = None,
+	) -> None:
 		super().__init__(driver, BRIDGE_NAME)
 
 		self.dTPoll = dTPoll
+
+		# Where the `systemctl status` line comes from, when there is one.
+		# Optional because nothing but the real run needs it: a bridge built
+		# in a test has no systemd to talk to and no reason to pretend.
+
+		self.notifier = notifier
 
 		# Every bridged device, keyed by the mDNS instance name it was
 		# discovered under. Keyed by that rather than by address because the
@@ -463,6 +476,42 @@ class CBridge(Bridge):  # tag = bridge
 		for dpoll in self.mpStrDpoll.values():
 			await dpoll.client.Close()
 
+	def NotifyStatus(self) -> None:
+		"""Tell systemd what this bridge is currently doing.
+
+		Every count is read off state the bridge already holds, so this is
+		cheap enough to call on every poll tick and let `CNotifier` decide
+		whether anything is worth sending.
+		"""
+
+		if self.notifier is None:
+			return
+
+		cLight = 0
+		cLightOffline = 0
+
+		for dpoll in self.mpStrDpoll.values():
+			for facc in dpoll.mpAddrFacc.values():
+				cLight += 1
+
+				if not facc.fOnline:
+					cLightOffline += 1
+
+		cClientPaired = len(self.driver.state.paired_clients)
+
+		self.notifier.Notify(
+			SStatus(
+				# Withheld once paired, for the reason `PrintSetupCode`
+				# spends a docstring on: the bridge would refuse it.
+
+				strPincode=None if cClientPaired else self.driver.state.pincode.decode(),
+				cClientPaired=cClientPaired,
+				cDevice=len(self.mpStrDpoll),
+				cLight=cLight,
+				cLightOffline=cLightOffline,
+			)
+		)
+
 	async def run(self) -> None:
 		"""Poll every device, forever.
 
@@ -529,6 +578,12 @@ class CBridge(Bridge):  # tag = bridge
 
 			if cFacc:
 				self._ConfigChanged()
+
+		# Unconditional, and deliberately not guarded by any "did anything
+		# change" test here. `CNotifier` already suppresses the resend, and
+		# working it out twice is how the two answers drift apart.
+
+		self.NotifyStatus()
 
 	def setup_message(self) -> None:
 		"""Nothing. `PrintSetupCode` says all of this, and says it better.
@@ -957,6 +1012,12 @@ class CPairingWatch:  # tag = pwat
 			pathPersist=self.pathPersist,
 		)
 
+		# The case the status line earns its keep on. The bridge has just
+		# become pairable with nobody watching the journal, and this puts
+		# the new setup code one `systemctl status` away.
+
+		self.bridge.NotifyStatus()
+
 	def _CloseOther(self, tplPeerKeep: tuple[str, int]) -> None:
 		"""Close every HAP connection except the one being answered.
 
@@ -1021,7 +1082,10 @@ async def NRun(
 		loop=loop,
 	)
 
-	bridge = CBridge(driver, dTPoll=dTPoll)
+	# Built before the bridge, because the bridge takes it. One notifier for
+	# the life of the process — it is what remembers the last line sent.
+
+	bridge = CBridge(driver, dTPoll=dTPoll, notifier=CNotifier())
 
 	# One watch for the whole run, opened before anything is bridged. The
 	# startup window is not a separate browse — it is the first `dTBrowse`
@@ -1094,6 +1158,12 @@ async def NRun(
 			cClientPaired=len(driver.state.paired_clients),
 			pathPersist=pathPersistDir / PERSIST_FILE,
 		)
+
+		# Straight after the printing, so the first status line carries the
+		# same facts that just went to the terminal rather than waiting a
+		# poll interval to agree with them.
+
+		bridge.NotifyStatus()
 
 		try:
 			await evStop.wait()

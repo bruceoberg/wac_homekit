@@ -309,6 +309,41 @@ yet, by someone who has not read any of this.
   bridge, so check the `pairing state in ...` line before believing anything
   else.
 
+- **`systemctl status` answers "is it paired, what is it serving, is anything
+  unreachable" without the journal.** `notify.py` sends `sd_notify`'s
+  `STATUS=` — one line, three states: `unpaired — setup code 123-45-678;
+  1 device, 3 lights`, `paired with 2 controllers; 1 device, 3 lights,
+  2 unreachable`, and `; no devices` in place of the counts for a bridge that
+  has found nothing yet. The unreachable clause is present only when it is
+  non-zero, and the counts are singular and plural correctly, because "1
+  lights" in that line reads as a bug in the bridge rather than in the line.
+
+  **The setup code appears in it while unpaired, and this is the one place
+  that is world-readable.** Any local unprivileged user can read a unit's
+  status over D-Bus, unlike the journal. Judged acceptable and recorded here
+  so it is a decision rather than an oversight: after pairing there is no code
+  in it at all — the same `cClientPaired` guard `PrintSetupCode` uses, for the
+  same reason — and a HAP setup code buys nothing to something not already on
+  the LAN.
+
+  **Cross-repo: the unit must set `NotifyAccess=main` or every datagram is
+  dropped.** The unit lives in a separate NixOS repo. There is no error, no
+  log line and nothing in `systemctl status` but a missing `Status:` field,
+  which looks exactly like the bridge not running this code — so a status
+  line that never appears is that setting before it is anything else.
+
+  Duplicate sends are suppressed in `CNotifier`, not worked out at the call
+  sites: the poll loop calls `NotifyStatus` every five seconds forever and the
+  common case is that nothing moved, so the comparison is against the last
+  formatted string and the call sites stay unconditional. Two answers to "did
+  anything change" is how the two drift apart.
+
+  **`READY=1` and the watchdog were left out deliberately.** The unit is
+  `Type=simple`; readiness sent to a unit that did not ask for it is ignored
+  at best, and at worst it invites a later `Type=notify` that nothing here is
+  written for. Nothing is sent on shutdown either — the process is going away
+  and systemd already shows the exit status.
+
 ### Pairing presentation
 
 - **The setup code is printed on every startup**, not only the first — which

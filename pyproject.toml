@@ -10,6 +10,7 @@ dependencies = [
     "hap-python>=5.0.0",
     "ifaddr>=0.2.0",
     "qrcode>=8.2",
+    "sdnotify>=0.3.2",
     "wac-iot[discovery]",
 ]
 
@@ -52,6 +53,12 @@ ignore_missing_imports = true
 # code goes through.
 [[tool.mypy.overrides]]
 module = ["qrcode.*"]
+ignore_missing_imports = true
+
+# sdnotify ships no py.typed either. One class, two methods, and a bare
+# `except:` around both — there is nothing here a stub would protect.
+[[tool.mypy.overrides]]
+module = ["sdnotify.*"]
 ignore_missing_imports = true
 
 # ... which makes Accessory and Bridge Any-typed bases. Subclassing them is the

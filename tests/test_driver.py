@@ -234,6 +234,10 @@ class CBridgeStub:  # tag = bridge
 		self.driver = driver
 		self.category = CATEGORY_BRIDGE
 
+	def NotifyStatus(self) -> None:
+		"""Nothing. The unpair path calls it; what it sends is tested in
+		`test_notify.py`, against numbers rather than against a live bridge."""
+
 
 class CHandlerStub:  # tag = handler
 	"""A HAPServerHandler mid-request."""
