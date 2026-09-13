@@ -703,6 +703,28 @@ def DriverBuild(
 	reason: its own choice follows the default route, which moves when a
 	laptop is docked, and the advertised address moving is what the Home app
 	sees as the bridge disappearing.
+
+	It is given *twice*, and the second one is the point. `address=` decides
+	what HAP-python binds and what goes in the advertised A record;
+	`interface_choice=` decides which interfaces its Zeroconf actually
+	multicasts that record over. Left unset, HAP-python builds an
+	`AsyncZeroconf()` with Zeroconf's own default of every interface — which
+	on a machine with a VPN up means announcing from a socket bound to
+	`0.0.0.0` onto a `utun` that carries no multicast, and an `EHOSTDOWN`
+	traceback for every announcement. Harmless, because the record's
+	*content* was always the pinned address, but it was the last place the
+	interface choice leaked.
+
+	The list is a plain list of addresses, which is exactly what `CWatcher`
+	is handed for the browse side — so the same value pins all three things
+	and they cannot drift.
+
+	Deliberately not `async_zeroconf_instance=`, which would share the
+	watcher's own instance and looks like the tidier fix. `async_stop` calls
+	`advertiser.async_close()` unconditionally, on an instance it was given
+	just as readily as on one it built — so sharing would have HAP-python
+	closing the watcher's Zeroconf out from under it, listeners and all.
+	Two instances on one pinned interface is the cheaper answer.
 	"""
 
 	pathPersistDir.mkdir(parents=True, exist_ok=True)
@@ -714,6 +736,7 @@ def DriverBuild(
 		pincode=strPincode.encode() if strPincode else None,
 		encoder=CEncoderPretty(),
 		loop=loop,
+		interface_choice=[strAddr],
 	)
 
 

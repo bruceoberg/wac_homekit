@@ -544,19 +544,32 @@ yet, by someone who has not read any of this.
   persist file, and stable across interfaces. Only the address moves.
   `StrAddrResolve` resolves one address and `NRun` hands the same one to both
   `AccessoryDriver(address=)` and `LDiscoBrowse`.
-- **`--interface` pins three things, and there is a fourth it does not.**
+- **`--interface` pins four things, and the fourth took a second parameter.**
   Pinned: the address HAP-python binds and listens on, the address it puts in
-  the advertised A record, and the interface `wac_iot` browses for devices on.
-  *Not* pinned: the set of interfaces HAP-python multicasts its own mDNS
-  announcement over. `AccessoryDriver` builds its own Zeroconf and we never
-  hand it one, so the announcement goes out everywhere — visible as a
-  `Host is down` (`EHOSTDOWN`) traceback from a socket bound to `0.0.0.0`
-  whenever a `utun` from a VPN is up, since those interfaces do not carry
-  multicast. Harmless, because the record *content* is still the pinned
-  address, so a controller that hears the announcement on any link connects
-  to the right one. Fixable by passing `zeroconf_instance=` — until then, do
-  not read the earlier phrasing "advertising and discovery cannot drift
-  apart" as covering the interface set. It covers the address only.
+  the advertised A record, the interface `wac_iot` browses for devices on, and
+  the set of interfaces HAP-python multicasts that record over. The last one
+  used to leak: `AccessoryDriver` builds its own Zeroconf, and unhandled it
+  gets Zeroconf's default of *every* interface, so the announcement went out
+  from a socket bound to `0.0.0.0` and produced a `Host is down`
+  (`EHOSTDOWN`) traceback whenever a VPN `utun` was up, since those links
+  carry no multicast. Never wrong, only noisy — the record's content was the
+  pinned address all along — but it was the last place the choice leaked.
+
+  `interface_choice=[strAddr]` closes it. The name suggests an
+  `InterfaceChoice` enum and the docstring says so too, but the code passes
+  the value straight to `AsyncZeroconf(interfaces=)`, which documents a list
+  of addresses as a first-class option — the same shape `CWatcher` is handed
+  for the browse side, so one resolved address pins all four.
+
+  **`async_zeroconf_instance=` is the fix that looks tidier and is not.**
+  Sharing the watcher's instance would mean one Zeroconf instead of two, but
+  `AccessoryDriver.async_stop` calls `advertiser.async_close()`
+  unconditionally — it does not track whether it built the thing — and that
+  close removes every service listener on the instance. HAP-python would be
+  tearing down the watcher's Zeroconf from inside its own shutdown. Two
+  instances pinned to one interface is the cheaper answer, and it keeps the
+  bridge clear of `zeroconf` entirely: a list of address strings is not an
+  import.
 - **`--interface` keeps its generic name on purpose.** It takes an interface
   name, an address, `wifi`, or `auto`, and every explicit value is a hard
   requirement — `CIfaceError` rather than a silent fallback, because a bridge
