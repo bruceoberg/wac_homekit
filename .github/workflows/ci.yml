@@ -29,9 +29,18 @@ jobs:
       - name: Type-check
         run: uv run mypy
 
+      # No install step: `uv sync` above brings in the `dev` group by default,
+      # which is where pytest lives. No arguments either — `testpaths` in the
+      # root pyproject.toml already covers both workspace members.
+      - name: Test
+        run: uv run pytest
+
       # --all-packages so wac_iot is built too, not just the root project.
       - name: Build
         run: uv build --all-packages
 
-# NOTE(bruce) no pytest step: the suite covers pure functions and runs locally
-# via `just test`. Device-layer verification needs real hardware (`just dump`).
+# NOTE(bruce) what CI does not cover: the suite is pure functions only —
+# conversions, tier selection, interface and persist-directory resolution, the
+# setup payload, the status line. Everything about the device layer and the
+# HomeKit layer needs real hardware and a real Home app (`just dump`, and the
+# verification notes in .claude/CLAUDE.md), which no runner can provide.
