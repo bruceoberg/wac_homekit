@@ -434,19 +434,21 @@ class CClientStub:  # tag = client
 class TestCMissForget:
 	"""Seconds in, consecutive missing polls out.
 
-	The floor is the whole point. A threshold shorter than one interval means
-	"as soon as possible", and rounding it to zero would silently mean
-	"never" — which is the value that disables removal entirely.
+	It rounds up, because a threshold is a minimum wait rather than a target
+	and removal is the one thing here that cannot be undone. The floor of 1
+	then only matters at the bottom: a threshold shorter than one interval
+	must not collapse into 0, which is the value that disables removal
+	entirely.
 	"""
 
 	def test_a_whole_number_of_intervals(self) -> None:
 		assert CMissForget(60.0, 5.0) == 12
 
-	def test_a_partial_interval_rounds_down(self) -> None:
+	def test_a_partial_interval_rounds_up(self) -> None:
 		"""Eleven polls is 55s, which is short of the threshold; the twelfth
 		is the first that has genuinely waited long enough."""
 
-		assert CMissForget(59.0, 5.0) == 11
+		assert CMissForget(59.0, 5.0) == 12
 
 	def test_shorter_than_one_interval_is_one_not_zero(self) -> None:
 		assert CMissForget(1.0, 5.0) == 1

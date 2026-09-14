@@ -311,11 +311,18 @@ yet, by someone who has not read any of this.
   transformer going quiet is indistinguishable from someone unplugging it.
 
   On top of that, hysteresis — the address has to be missing from N
-  *consecutive successful* polls, N being the threshold divided by the poll
-  interval with a floor of 1. Not because the evidence is weak but because a
-  bulk fixture read has been seen to omit fixtures it should have listed (see
-  the device layer); `SnapPoll` works around that already, and this is the
-  belt to its braces.
+  *consecutive successful* polls. Not because the evidence is weak but
+  because a bulk fixture read has been seen to omit fixtures it should have
+  listed (see the device layer); `SnapPoll` works around that already, and
+  this is the belt to its braces.
+
+  N is the threshold divided by the poll interval and **rounded up**, because
+  a threshold is a minimum wait and not a target: `--forget-missing 59` at a
+  5s interval waits twelve polls, not eleven. Truncating would have fired at
+  55 seconds — before the user asked, on the one action here that cannot be
+  undone. Ceiling makes the floor of 1 redundant for any positive threshold;
+  it stays for the case it was written for, which is a threshold shorter than
+  one interval collapsing into 0, the value that means never.
 
   The shape mirrors the addition path it sits next to. `SetNAddrForget` is
   the decision and removes nothing — pure enough to test against a stub

@@ -16,6 +16,7 @@ from __future__ import annotations  # Forward refs without quotes
 import asyncio
 import json
 import logging
+import math
 import os
 import signal
 import sys
@@ -464,6 +465,18 @@ class CBridge(Bridge):  # tag = bridge
 		than through `async_subscribe_client_topic` because the public route
 		wants one call per (client, topic) pair and there is nothing to
 		unsubscribe *from* any more — the accessory is gone either way.
+
+		**Deleting a key out from under a live subscriber is safe, and that
+		was checked rather than assumed.** A `HAPServerProtocol` keeps no
+		record of what it subscribed to — the driver's dict is the only copy
+		— so when the connection eventually drops,
+		`AccessoryDriver.connection_lost` *discovers* the client's topics by
+		scanning that same dict, and simply never visits a key that is no
+		longer in it. `async_subscribe_client_topic` guards independently
+		(`if topic not in self.topics: return`), and the event coalescer
+		reads through `topics.get(topic, [])`. Nothing indexes it unguarded,
+		so a controller that was watching a removed light does not take its
+		own connection down on the way out.
 		"""
 
 		strPrefix = f"{nAid}."
@@ -876,10 +889,18 @@ def CMissForget(dTForget: float, dTPoll: float) -> int:
 	fixture keeps the decision a pure integer comparison, which is also what
 	makes it testable.
 
-	The floor is 1, not 0: a threshold shorter than one poll interval means
-	"as soon as possible", and rounding it down to zero would silently mean
-	"never" — the same value that disables the feature. Zero is reserved for
-	the user actually asking for off.
+	**Rounds up.** A threshold is a minimum wait, not a target: `60` at a 5s
+	interval is "do not remove this until it has been gone a minute", and
+	truncating 59s to eleven polls would fire at 55 — before the user asked,
+	on the one action this bridge takes that cannot be undone. Every other
+	decision in the feature errs towards keeping an accessory, and so does
+	this one.
+
+	The floor of 1 is therefore redundant for any positive threshold, since
+	ceiling already lands there, and it stays for the case it was written
+	for: a threshold shorter than one interval must not collapse into 0,
+	which is the value that means "never". Zero is reserved for the user
+	actually asking for off.
 	"""
 
 	if dTForget <= 0:
@@ -892,7 +913,7 @@ def CMissForget(dTForget: float, dTPoll: float) -> int:
 
 		return 1
 
-	return max(1, int(dTForget / dTPoll))
+	return max(1, math.ceil(dTForget / dTPoll))
 
 
 def DriverBuild(
