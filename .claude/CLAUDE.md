@@ -288,10 +288,63 @@ yet, by someone who has not read any of this.
   Response on every one of its lights — which is the correct HomeKit
   presentation and is based on a real request rather than on a missing packet.
   A device that returns resumes polling with no ceremony.
-- **Nothing is ever removed from the bridge.** A fixture or device that is
-  genuinely gone stays on show as No Response until a restart. Removing an
-  accessory from a live bridge has pairing-state consequences that deserve
-  their own phase; there is a `BB(bruce)` at the natural place.
+- **Removal is off by default, and what it costs is why.** Taking an
+  accessory off a live bridge is not undone by putting the fixture back: iOS
+  drops that accessory's room, its name, and its membership in every scene
+  and automation, and the fixture that returns comes back as a stranger to be
+  set up again — even though `NAidFromFixtureId` hands it the identical AID.
+  Against that, never removing costs a light stuck on No Response until the
+  bridge is restarted. One of those is an evening's work and the other is an
+  annoyance, so the default errs towards the annoyance: `--forget-missing`
+  takes seconds and defaults to 0, never. Its help text says outright what a
+  non-zero value loses.
+
+  **One signal earns a removal, and it is positive evidence.** A device
+  answered a poll, successfully, right now, and its fixture list no longer
+  carries an address this bridge holds an accessory for — the fixture was
+  pulled from the track or deleted in the WAC app. Nothing else counts. An
+  unreachable device is a power cut, a reboot, or a lease change caught
+  mid-flight, and a failed poll never reaches the decision at all, so a
+  transformer unplugged for an afternoon comes back to exactly the miss
+  counts it left with. An mDNS `Removed` is advisory and still does nothing.
+  And **devices themselves are never removed**, at any threshold: a whole
+  transformer going quiet is indistinguishable from someone unplugging it.
+
+  On top of that, hysteresis — the address has to be missing from N
+  *consecutive successful* polls, N being the threshold divided by the poll
+  interval with a floor of 1. Not because the evidence is weak but because a
+  bulk fixture read has been seen to omit fixtures it should have listed (see
+  the device layer); `SnapPoll` works around that already, and this is the
+  belt to its braces.
+
+  The shape mirrors the addition path it sits next to. `SetNAddrForget` is
+  the decision and removes nothing — pure enough to test against a stub
+  snapshot, which is where every case above is pinned down. `_CFaccForget` is
+  the mechanics, batched one `config_changed()` per device that lost
+  something rather than one per fixture, logged at **warning** because
+  someone reading the journal to find out where a light went should not need
+  debug to find it. A removed address is *not* added to `setNAddrSkip`, so a
+  fixture that comes back is rebuilt by the ordinary unbridged path.
+
+  **`Bridge.accessories` is not quite the whole of it.** It is what
+  HAP-python serves from — `to_HAP`, `get_accessories` and
+  `get_characteristic` read it and nothing holds a second list — but
+  `driver.topics`, the per-`aid.iid` event subscription registry, is
+  untouched by any of that, so `_TopicsForget` clears it. Left behind, a
+  reconcile still in flight would push an event for an accessory the
+  controller has just been told does not exist; cleared, that reconcile runs
+  to completion and `driver.publish` returns before it reaches a socket,
+  which is exactly what should happen to a write the user asked for against a
+  fixture that has since gone.
+
+  **The one rough edge is HAP-python's.**
+  `AccessoryDriver.get_characteristics` checks for a missing accessory and
+  skips it; `set_characteristics` does not, and raises `AttributeError` on
+  `None`. A controller writing to the removed AID between `config_changed`
+  and its refetch of `/accessories` therefore gets its HAP connection dropped
+  with a traceback in the log, then reconnects and carries on. Narrow, not
+  worth a second monkeypatch of HAP-python, and recorded here so the
+  traceback reads as known rather than as the removal having gone wrong.
 - **Discovery events are handled one at a time, and that is the whole of the
   race protection.** `WatchAsync` awaits each `OnDevent` to completion, so a
   device that announces itself three times during its own first add finds
@@ -604,6 +657,14 @@ pure functions whose arithmetic is easy to get subtly wrong:
   mistaken for a bridge coming free, and that the connection being answered is
   not among the ones dropped. The driver is stubbed — the decision is ours,
   the mechanics are HAP-python's.
+- the removal path, which is the one where a wrong answer costs a user their
+  Home app configuration: `SetNAddrForget` against stub snapshots, for what
+  earns a removal and — far more of the cases — what does not; `CMissForget`
+  for the seconds-to-polls arithmetic, including the floor of 1 that keeps a
+  threshold shorter than one interval from collapsing into "never"; and
+  `_CFaccForget` on a real `CBridge` over a stub driver, for the accessory
+  leaving both maps, its event subscriptions going with it, and one config
+  change per device rather than one per fixture.
 
 The accessory and driver layers need a real device and a real Home app; a
 HAP-python test harness would only be testing HAP-python.

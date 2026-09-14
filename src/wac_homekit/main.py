@@ -15,7 +15,13 @@ from pathlib import Path
 from wac_iot import WacError
 
 from . import __version__
-from .driver import PERSIST_DIR_SERVICE, POLL_INTERVAL_DEFAULT, PORT_DEFAULT, NRun
+from .driver import (
+	FORGET_MISSING_DEFAULT,
+	PERSIST_DIR_SERVICE,
+	POLL_INTERVAL_DEFAULT,
+	PORT_DEFAULT,
+	NRun,
+)
 from .netiface import IFACE_AUTO, CIfaceError
 
 # HomeKit setup codes are eight digits, and the 3-2-3 grouping is not
@@ -88,6 +94,23 @@ def main() -> None:
 		type=float,
 		default=POLL_INTERVAL_DEFAULT,
 		help=f"seconds between device polls (default: {POLL_INTERVAL_DEFAULT:g})",
+	)
+	parser.add_argument(
+		"--forget-missing",
+		type=float,
+		default=FORGET_MISSING_DEFAULT,
+		metavar="SECONDS",
+		help=(
+			"remove a light from the bridge once its fixture has been absent "
+			"from a reachable device's polls for this long (default: "
+			f"{FORGET_MISSING_DEFAULT:g}, never). THIS LOSES THE ACCESSORY'S "
+			"HOME APP CONFIGURATION — its room, its name, and its place in "
+			"every scene and automation — and a fixture that comes back comes "
+			"back as a new accessory. off by default, where a fixture that is "
+			"gone shows as No Response until the bridge is restarted. a device "
+			"that stops answering altogether is never removed, however long "
+			"it stays away"
+		),
 	)
 	parser.add_argument(
 		"--persist-dir",
@@ -168,6 +191,7 @@ def main() -> None:
 			NRun(
 				dTBrowse=args.browse,
 				dTPoll=args.poll_interval,
+				dTForget=args.forget_missing,
 				pathPersistDir=args.persist_dir,
 				nPort=args.port,
 				strPincode=args.pincode,

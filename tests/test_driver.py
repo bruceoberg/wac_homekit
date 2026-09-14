@@ -7,6 +7,8 @@ harness would only be testing HAP-python.
 
 from __future__ import annotations  # Forward refs without quotes
 
+import asyncio
+
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,11 +17,17 @@ from uuid import UUID, uuid4
 import pytest
 
 from pyhap.hap_handler import HAPServerHandler
+from pyhap.loader import Loader
 from pyhap.state import State
+
+from wac_iot import WacTransportError
 
 from wac_homekit.driver import (
 	PERSIST_DIR_NAME,
 	XHM_PREFIX,
+	CBridge,
+	CDevicePoll,
+	CMissForget,
 	CPairingWatch,
 	CUnpairAll,
 	PathPersistResolve,
@@ -379,3 +387,311 @@ class TestCPairingWatch:
 
 		assert not protoAsker.fClosed
 		assert protoOther.fClosed
+
+
+class CSnapStub:  # tag = snap
+	"""A CSnapshot as far as the removal decision reaches into it.
+
+	Only the known-fixture map matters here — the decision is set arithmetic
+	on addresses, and what hangs off each one is the accessory's business.
+	"""
+
+	def __init__(self, *lAddr: int) -> None:
+		self.mpAddrFixtureKnown: dict[int, Any] = {nAddr: object() for nAddr in lAddr}
+
+
+class CFaccStub:  # tag = facc
+	"""One bridged light, as the poll and the removal reach into it."""
+
+	def __init__(self, nAid: int, strName: str) -> None:
+		self.aid = nAid
+		self.display_name = strName
+		self.cOffline = 0
+
+	def Reconcile(self, fixture: Any, *, tPoll: float) -> None:
+		"""Nothing. What a fixture's state does to its characteristics is
+		`test_accessory.py`'s business, and needs a real HAP service."""
+
+	def MarkOffline(self) -> None:
+		self.cOffline += 1
+
+
+class CClientStub:  # tag = client
+	"""A CClient that answers one canned snapshot, or refuses to."""
+
+	def __init__(self, *lAddr: int, fFail: bool = False) -> None:
+		self.strHost = "10.0.0.5"
+		self.lAddr = lAddr
+		self.fFail = fFail
+
+	async def SnapPoll(self) -> CSnapStub:
+		if self.fFail:
+			raise WacTransportError("connection reset")
+
+		return CSnapStub(*self.lAddr)
+
+
+class TestCMissForget:
+	"""Seconds in, consecutive missing polls out.
+
+	The floor is the whole point. A threshold shorter than one interval means
+	"as soon as possible", and rounding it to zero would silently mean
+	"never" — which is the value that disables removal entirely.
+	"""
+
+	def test_a_whole_number_of_intervals(self) -> None:
+		assert CMissForget(60.0, 5.0) == 12
+
+	def test_a_partial_interval_rounds_down(self) -> None:
+		"""Eleven polls is 55s, which is short of the threshold; the twelfth
+		is the first that has genuinely waited long enough."""
+
+		assert CMissForget(59.0, 5.0) == 11
+
+	def test_shorter_than_one_interval_is_one_not_zero(self) -> None:
+		assert CMissForget(1.0, 5.0) == 1
+
+	def test_zero_is_off(self) -> None:
+		assert CMissForget(0.0, 5.0) == 0
+
+	def test_negative_is_off(self) -> None:
+		assert CMissForget(-1.0, 5.0) == 0
+
+	def test_a_nonsense_interval_does_not_divide_by_zero(self) -> None:
+		"""Not reachable from the CLI, and a traceback at startup would be a
+		worse answer than the only sensible reading of it."""
+
+		assert CMissForget(60.0, 0.0) == 1
+
+
+class TestSetNAddrForget:
+	"""When a fixture has earned removal — which is destructive and final.
+
+	iOS loses the accessory's room, its name, and its place in every scene
+	and automation, and a fixture that returns comes back as a stranger
+	despite a derived, identical AID. So the bar is positive evidence only: a
+	device answered, right now, and did not mention a fixture this bridge
+	holds an accessory for.
+	"""
+
+	ADDR = 167772157
+	ADDR_OTHER = 167772158
+
+	def DpollBuild(self, *lAddr: int) -> CDevicePoll:
+		# Never polled through — every test here calls the decision directly,
+		# with the snapshot it wants to try.
+
+		dpoll = CDevicePoll(CClientStub(), strDeviceId="dev")  # type: ignore[arg-type]
+
+		for iAddr, nAddr in enumerate(lAddr):
+			dpoll.mpAddrFacc[nAddr] = CFaccStub(100 + iAddr, f"Light {iAddr}")  # type: ignore[assignment]
+
+		return dpoll
+
+	def test_an_address_that_keeps_reporting_is_never_returned(self) -> None:
+		dpoll = self.DpollBuild(self.ADDR)
+
+		for _ in range(20):
+			assert not dpoll.SetNAddrForget(CSnapStub(self.ADDR), cMissForget=3)  # type: ignore[arg-type]
+
+	def test_fewer_than_the_threshold_is_not_enough(self) -> None:
+		dpoll = self.DpollBuild(self.ADDR)
+
+		for _ in range(2):
+			assert not dpoll.SetNAddrForget(CSnapStub(), cMissForget=3)  # type: ignore[arg-type]
+
+	def test_exactly_the_threshold_earns_it(self) -> None:
+		dpoll = self.DpollBuild(self.ADDR)
+
+		for _ in range(2):
+			dpoll.SetNAddrForget(CSnapStub(), cMissForget=3)  # type: ignore[arg-type]
+
+		assert dpoll.SetNAddrForget(CSnapStub(), cMissForget=3) == {self.ADDR}  # type: ignore[arg-type]
+
+	def test_a_failed_poll_between_two_misses_does_not_advance_it(self) -> None:
+		"""A failed poll never reaches here at all — `Poll` returns None and
+		`_PollAll` skips — so a device unreachable for an hour comes back to
+		exactly the counts it left with. This is that invariant stated as the
+		absence it is."""
+
+		dpoll = self.DpollBuild(self.ADDR)
+
+		dpoll.SetNAddrForget(CSnapStub(), cMissForget=2)  # type: ignore[arg-type]
+
+		# The hour of failed polls. Nothing is called, so nothing moves.
+
+		assert dpoll.mpAddrCMiss == {self.ADDR: 1}
+
+		assert dpoll.SetNAddrForget(CSnapStub(), cMissForget=2) == {self.ADDR}  # type: ignore[arg-type]
+
+	def test_reappearing_resets_the_count(self) -> None:
+		"""A run of misses that did not reach the threshold buys nothing
+		towards the next run."""
+
+		dpoll = self.DpollBuild(self.ADDR)
+
+		for _ in range(2):
+			dpoll.SetNAddrForget(CSnapStub(), cMissForget=3)  # type: ignore[arg-type]
+
+		assert not dpoll.SetNAddrForget(CSnapStub(self.ADDR), cMissForget=3)  # type: ignore[arg-type]
+		assert not dpoll.mpAddrCMiss
+
+		for _ in range(2):
+			assert not dpoll.SetNAddrForget(CSnapStub(), cMissForget=3)  # type: ignore[arg-type]
+
+		assert dpoll.SetNAddrForget(CSnapStub(), cMissForget=3) == {self.ADDR}  # type: ignore[arg-type]
+
+	def test_a_threshold_of_zero_never_returns_anything(self) -> None:
+		"""The default, and the counts are kept regardless — what zero
+		disables is the answer, not the arithmetic."""
+
+		dpoll = self.DpollBuild(self.ADDR)
+
+		for _ in range(50):
+			assert not dpoll.SetNAddrForget(CSnapStub(), cMissForget=0)  # type: ignore[arg-type]
+
+		assert dpoll.mpAddrCMiss == {self.ADDR: 50}
+
+	def test_only_the_missing_address_is_returned(self) -> None:
+		dpoll = self.DpollBuild(self.ADDR, self.ADDR_OTHER)
+
+		snap = CSnapStub(self.ADDR_OTHER)
+
+		assert dpoll.SetNAddrForget(snap, cMissForget=1) == {self.ADDR}  # type: ignore[arg-type]
+
+	def test_counts_are_dropped_with_the_accessory(self) -> None:
+		"""Otherwise a fixture rebuilt at the same address would inherit the
+		misses that got its predecessor removed."""
+
+		dpoll = self.DpollBuild(self.ADDR)
+
+		dpoll.SetNAddrForget(CSnapStub(), cMissForget=3)  # type: ignore[arg-type]
+		dpoll.mpAddrFacc.clear()
+
+		assert not dpoll.SetNAddrForget(CSnapStub(), cMissForget=3)  # type: ignore[arg-type]
+		assert not dpoll.mpAddrCMiss
+
+
+class CDriverForgetStub:  # tag = driver
+	"""AccessoryDriver as far as building a bridge and removing from it reach.
+
+	`loader` is HAP-python's real one, because the bridge's own constructor
+	wants an AccessoryInformation service and a stub of that would be a stub
+	of the thing under test's foundations. Everything else is a counter.
+	"""
+
+	def __init__(self) -> None:
+		self.loader = Loader()
+		self.topics: dict[str, set[tuple[str, int]]] = {}
+		self.cConfigChanged = 0
+
+	def config_changed(self) -> None:
+		self.cConfigChanged += 1
+
+
+class TestCFaccForget:
+	"""The mechanics of taking a light off a live bridge.
+
+	The decision is tested above and is the half with judgement in it. This
+	is the half that has to leave nothing behind: `Bridge.accessories` is
+	what HAP-python serves from, and `driver.topics` is where a late event
+	would otherwise still find a subscriber for an accessory the controller
+	has just been told does not exist.
+	"""
+
+	ADDR = 167772157
+	ADDR_OTHER = 167772158
+
+	def BridgeBuild(self) -> tuple[CBridge, CDriverForgetStub]:
+		driver = CDriverForgetStub()
+		bridge = CBridge(driver, dTPoll=5.0, cMissForget=1)  # type: ignore[arg-type]
+		bridge.fServing = True
+
+		return bridge, driver
+
+	def DpollBuild(self, bridge: CBridge, *lAddr: int, client: Any = None) -> CDevicePoll:
+		dpoll = CDevicePoll(client or CClientStub(), strDeviceId="dev")  # type: ignore[arg-type]
+
+		for iAddr, nAddr in enumerate(lAddr):
+			facc = CFaccStub(100 + iAddr, f"Light {iAddr}")
+
+			dpoll.mpAddrFacc[nAddr] = facc  # type: ignore[assignment]
+			bridge.accessories[facc.aid] = facc  # type: ignore[assignment]
+
+		bridge.mpStrDpoll["WAC_CS_abc123"] = dpoll
+
+		return dpoll
+
+	def test_the_accessory_leaves_both_the_bridge_and_the_device(self) -> None:
+		bridge, _ = self.BridgeBuild()
+		dpoll = self.DpollBuild(bridge, self.ADDR, self.ADDR_OTHER)
+
+		assert bridge._CFaccForget(dpoll, {self.ADDR}) == 1
+
+		assert 100 not in bridge.accessories
+		assert self.ADDR not in dpoll.mpAddrFacc
+
+		# The one that stayed, which is what makes the assertion above mean
+		# something other than "the dicts were emptied".
+
+		assert 101 in bridge.accessories
+		assert self.ADDR_OTHER in dpoll.mpAddrFacc
+
+	def test_event_subscriptions_go_with_it(self) -> None:
+		"""Left behind, a reconcile still in flight would push an event for an
+		accessory the controller no longer knows about."""
+
+		bridge, driver = self.BridgeBuild()
+		dpoll = self.DpollBuild(bridge, self.ADDR, self.ADDR_OTHER)
+
+		driver.topics = {
+			"100.9": {("10.0.0.9", 50000)},
+			"100.11": {("10.0.0.9", 50000)},
+			"101.9": {("10.0.0.9", 50000)},
+		}
+
+		bridge._CFaccForget(dpoll, {self.ADDR})
+
+		assert set(driver.topics) == {"101.9"}
+
+	def test_a_removed_address_is_not_skipped_afterwards(self) -> None:
+		"""A fixture that comes back should be rebuilt by the ordinary
+		unbridged path, not declined forever."""
+
+		bridge, _ = self.BridgeBuild()
+		dpoll = self.DpollBuild(bridge, self.ADDR)
+
+		bridge._CFaccForget(dpoll, {self.ADDR})
+
+		assert not dpoll.setNAddrSkip
+		assert dpoll.SetNAddrUnbridged(CSnapStub(self.ADDR)) == {self.ADDR}  # type: ignore[arg-type]
+
+	def test_one_config_change_per_device_not_per_fixture(self) -> None:
+		"""Every call rewrites the persist file and bumps the advertised
+		config number, so two fixtures leaving one device is one event."""
+
+		bridge, driver = self.BridgeBuild()
+
+		# The device answers, and mentions neither fixture. That is the one
+		# signal removal is allowed to act on.
+
+		self.DpollBuild(bridge, self.ADDR, self.ADDR_OTHER, client=CClientStub())
+
+		asyncio.run(bridge._PollAll())
+
+		assert not bridge.accessories
+		assert driver.cConfigChanged == 1
+
+	def test_a_device_that_did_not_answer_loses_nothing(self) -> None:
+		"""A failed poll is a power cut, a reboot, or a lease change caught
+		mid-flight. There is no evidence in it at all."""
+
+		bridge, driver = self.BridgeBuild()
+		dpoll = self.DpollBuild(bridge, self.ADDR, client=CClientStub(fFail=True))
+
+		for _ in range(10):
+			asyncio.run(bridge._PollAll())
+
+		assert self.ADDR in dpoll.mpAddrFacc
+		assert not dpoll.mpAddrCMiss
+		assert not driver.cConfigChanged

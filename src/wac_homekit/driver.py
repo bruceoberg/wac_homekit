@@ -77,6 +77,18 @@ POLL_INTERVAL_DEFAULT = 5.0
 POLL_TIMEOUT = 5.0
 POLL_RETRY = 1
 
+# Seconds a fixture must be absent from a *reachable* device's polls before its
+# accessory is taken off the bridge. Zero is off, and off is the default.
+#
+# Removal is destructive in a way that putting the fixture back does not undo:
+# iOS drops the accessory's room, its name, and its membership in every scene
+# and automation, and a fixture that returns comes back as a stranger even
+# though its AID is derived and identical. Against that, the cost of never
+# removing is a light stuck on "No Response" until the bridge is restarted —
+# an annoyance. So the default errs where the cheap mistake is.
+
+FORGET_MISSING_DEFAULT = 0.0
+
 
 class CDevicePoll:  # tag = dpoll
 	"""One device's client and the accessories built from its fixtures."""
@@ -99,6 +111,12 @@ class CDevicePoll:  # tag = dpoll
 		# light" line is logged once rather than every five seconds forever.
 
 		self.setNAddrSkip: set[int] = set()
+
+		# Consecutive *successful* polls in which each bridged address went
+		# unreported. The only evidence this bridge trusts for removal — see
+		# `SetNAddrForget` for why nothing else counts.
+
+		self.mpAddrCMiss: dict[int, int] = {}
 
 	async def Poll(self) -> CSnapshot | None:
 		"""Read the whole device once and hand each fixture to its accessory.
@@ -141,6 +159,68 @@ class CDevicePoll:  # tag = dpoll
 
 		return snap.mpAddrFixtureKnown.keys() - self.mpAddrFacc.keys() - self.setNAddrSkip
 
+	def SetNAddrForget(self, snap: CSnapshot, *, cMissForget: int) -> set[int]:
+		"""Bridged addresses this snapshot proves are gone. Removes nothing.
+
+		Kept apart from the removal itself, the way `SetNAddrUnbridged` is
+		kept apart from `_CFaccAdd`: the decision is ours and testable without
+		HAP-python, the mechanics are HAP-python's.
+
+		**Only one signal counts, and this is it:** a device answered a poll
+		successfully, right now, and its fixture list no longer carries an
+		address this bridge holds an accessory for. That means the fixture was
+		pulled from the track or deleted in the WAC app. Everything else that
+		looks like disappearance is not evidence at all — an unreachable
+		device is a power cut, a reboot or a lease change caught mid-flight;
+		an mDNS `Removed` is advisory; and a whole device going quiet is
+		indistinguishable from someone unplugging a transformer for the
+		afternoon. Which is why this is only ever reached from a poll that
+		*succeeded*, and why devices are never removed at all.
+
+		**Never called on a failed poll** — `Poll` returns None for that and
+		`_PollAll` skips. The counters must not move then: a device
+		unreachable for an hour has to come back to exactly the counts it
+		left with.
+
+		Hysteresis on top of that, because a bulk fixture read has been seen
+		to omit fixtures it should have listed. `SnapPoll` works around that
+		with an explicit address array, but the conservative reading is that
+		an absence may still be transient, so an address has to be missing
+		from `cMissForget` consecutive successful polls before it earns
+		removal. Zero disables it outright, whatever the counts say.
+
+		The caller is expected to act on what comes back. An address that has
+		earned removal and is not removed goes on earning it every tick.
+		"""
+
+		# Addresses whose accessory has already gone — removed last tick, or
+		# never built. Nothing to count for them.
+
+		self.mpAddrCMiss = {
+			nAddr: cMiss
+			for nAddr, cMiss in self.mpAddrCMiss.items()
+			if nAddr in self.mpAddrFacc
+		}
+
+		setNAddrForget: set[int] = set()
+
+		for nAddr in self.mpAddrFacc:
+			if nAddr in snap.mpAddrFixtureKnown:
+				# Back, or never away. A run of misses that did not reach the
+				# threshold buys nothing towards the next one.
+
+				self.mpAddrCMiss.pop(nAddr, None)
+
+				continue
+
+			cMiss = self.mpAddrCMiss.get(nAddr, 0) + 1
+			self.mpAddrCMiss[nAddr] = cMiss
+
+			if cMissForget and cMiss >= cMissForget:
+				setNAddrForget.add(nAddr)
+
+		return setNAddrForget
+
 
 class CBridge(Bridge):  # tag = bridge
 	"""Every light on every discovered device, behind one HomeKit bridge."""
@@ -150,11 +230,19 @@ class CBridge(Bridge):  # tag = bridge
 		driver: AccessoryDriver,
 		*,
 		dTPoll: float,
+		cMissForget: int = 0,
 		notifier: CNotifier | None = None,
 	) -> None:
 		super().__init__(driver, BRIDGE_NAME)
 
 		self.dTPoll = dTPoll
+
+		# Consecutive missing polls before a fixture's accessory is taken off
+		# the bridge; zero never removes anything. In polls rather than in
+		# seconds because that is what the counters count — `CMissForget` does
+		# the arithmetic once, at startup, against the interval in force.
+
+		self.cMissForget = cMissForget
 
 		# Where the `systemctl status` line comes from, when there is one.
 		# Optional because nothing but the real run needs it: a bridge built
@@ -307,6 +395,91 @@ class CBridge(Bridge):  # tag = bridge
 
 		return cFacc
 
+	def _CFaccForget(self, dpoll: CDevicePoll, setNAddr: set[int]) -> int:
+		"""Take the accessories for these addresses off the bridge, for good.
+
+		The mechanics half of the removal; `SetNAddrForget` is the decision
+		half and is the one with the judgement in it. Returns how many went,
+		so the caller batches the config change per device rather than per
+		fixture.
+
+		`Bridge.accessories` is the whole of what HAP-python consults —
+		`to_HAP`, `get_accessories` and `get_characteristic` all read it and
+		nothing else holds a second list. What it does *not* clean up is
+		`driver.topics`, the per-(aid, iid) event subscription registry, so
+		that is done here: left behind, a late reconcile would push an event
+		for an accessory the controller has just been told does not exist.
+
+		Logged at warning rather than info on purpose. This is destructive and
+		not undone by putting the fixture back — iOS loses the accessory's
+		room, its name, and its place in every scene and automation — so
+		someone reading the journal to work out where a light went should find
+		it without turning on debug.
+
+		Deliberately *not* added to `setNAddrSkip`: a fixture that comes back
+		should be picked up by the ordinary unbridged path and rebuilt.
+
+		A control request already in flight for this accessory is left to
+		finish, and that is right: the user asked for it, the device still
+		answers at that address, and `_ControlAsync` holds the client rather
+		than the bridge. What it does on the way back is nothing — the
+		reconcile pushes values into characteristics nobody is subscribed to
+		any more, because the topics went with the accessory above, so
+		`driver.publish` returns before it reaches a socket.
+
+		What HAP-python does *not* survive is a controller writing to the
+		removed AID before it refetches `/accessories`.
+		`AccessoryDriver.get_characteristics` checks for the missing
+		accessory and skips it; `set_characteristics` does not, and raises
+		`AttributeError` on `None`. asyncio turns that into a dropped HAP
+		connection with a traceback in the log; iOS reconnects, refetches,
+		and carries on. The window is between `config_changed` and that
+		refetch, and it is narrow — but a bridge with `--forget-missing` on
+		may show one, and it is HAP-python's bug rather than a sign the
+		removal went wrong.
+		"""
+
+		for nAddr in sorted(setNAddr):
+			facc = dpoll.mpAddrFacc.pop(nAddr)
+
+			self.accessories.pop(facc.aid, None)
+			self._TopicsForget(facc.aid)
+
+			g_log.warning(
+				"%s: removing %s — fixture %d gone from %d consecutive polls; "
+				"its Home app room, name, scenes and automations go with it",
+				dpoll.client.strHost,
+				facc.display_name,
+				nAddr,
+				dpoll.mpAddrCMiss.get(nAddr, self.cMissForget),
+			)
+
+		return len(setNAddr)
+
+	def _TopicsForget(self, nAid: int) -> None:
+		"""Drop every event subscription belonging to one accessory.
+
+		HAP-python keys `driver.topics` by `f"{aid}.{iid}"`, and an aid is an
+		integer, so the prefix match is exact. Reaching into the dict rather
+		than through `async_subscribe_client_topic` because the public route
+		wants one call per (client, topic) pair and there is nothing to
+		unsubscribe *from* any more — the accessory is gone either way.
+		"""
+
+		strPrefix = f"{nAid}."
+
+		# Materialized before deleting, because this is the driver's own dict
+		# and mutating it under iteration raises.
+
+		lStrTopic = [
+			strTopic
+			for strTopic in self.driver.topics
+			if strTopic.startswith(strPrefix)
+		]
+
+		for strTopic in lStrTopic:
+			del self.driver.topics[strTopic]
+
 	def _ConfigChanged(self) -> None:
 		"""Tell paired controllers the accessory list moved.
 
@@ -414,11 +587,12 @@ class CBridge(Bridge):  # tag = bridge
 				# device's lights. A device that comes back resumes polling
 				# with no ceremony.
 				#
-				# BB(bruce): and nothing is ever removed from the bridge. A
-				# fixture or a device that is genuinely gone stays on show as
-				# No Response until a restart. Taking an accessory out of a
-				# live bridge has pairing-state consequences — iOS remembers
-				# what it paired with by AID — that deserve their own phase.
+				# Still nothing, now that `--forget-missing` can remove an
+				# accessory, and for a sharper reason than before: removal is
+				# destructive and a missing packet is not evidence. The only
+				# thing that earns it is a device *answering* and not
+				# mentioning a fixture it used to have — which this event is
+				# the precise opposite of. Devices are never removed at all.
 
 				g_log.debug("%s: mDNS says gone; leaving it to the poll", devent.disco.strHost)
 
@@ -559,24 +733,36 @@ class CBridge(Bridge):  # tag = bridge
 			if objResult is None:
 				continue
 
+			# Removal first, on the same snapshot, so a fixture that went and
+			# came back inside one tick — an address reused by a replacement,
+			# say — is removed and rebuilt in the right order rather than
+			# added and then immediately taken away again.
+			#
+			# Reached only from a poll that answered. That is the whole of the
+			# evidence rule: see `SetNAddrForget`.
+
+			cFaccMoved = self._CFaccForget(
+				dpoll,
+				dpoll.SetNAddrForget(objResult, cMissForget=self.cMissForget),
+			)
+
 			# A fixture commissioned into a running system arrives here — the
 			# poll already read it, so noticing costs a set comparison and no
 			# extra request. Batched per device: one config change however
-			# many fixtures a single device contributed.
+			# many fixtures a single device contributed, in either direction.
 			#
 			# Guarded because building an accessory needs the snapshot to
 			# identify itself, which a device that answered but reported no
 			# MAC cannot do. That is worth a line in the log and nothing more
-			# — it must not be what ends the poll loop.
+			# — it must not be what ends the poll loop, and it must not
+			# swallow a removal that already happened.
 
 			try:
-				cFacc = self._CFaccAdd(dpoll, objResult)
+				cFaccMoved += self._CFaccAdd(dpoll, objResult)
 			except WacError as exc:
 				g_log.error("%s: could not add a new fixture: %s", dpoll.client.strHost, exc)
 
-				continue
-
-			if cFacc:
+			if cFaccMoved:
 				self._ConfigChanged()
 
 		# Unconditional, and deliberately not guarded by any "did anything
@@ -680,6 +866,33 @@ def PathPersistResolve(
 	pathStateHome = Path(strStateHome) if strStateHome else Path.home() / ".local" / "state"
 
 	return pathStateHome / PERSIST_DIR_NAME
+
+
+def CMissForget(dTForget: float, dTPoll: float) -> int:
+	"""Consecutive missing polls that `--forget-missing SECONDS` comes to.
+
+	Seconds are what a user can reason about; polls are what the counters
+	count. Converting once here rather than comparing elapsed time per
+	fixture keeps the decision a pure integer comparison, which is also what
+	makes it testable.
+
+	The floor is 1, not 0: a threshold shorter than one poll interval means
+	"as soon as possible", and rounding it down to zero would silently mean
+	"never" — the same value that disables the feature. Zero is reserved for
+	the user actually asking for off.
+	"""
+
+	if dTForget <= 0:
+		return 0
+
+	if dTPoll <= 0:
+		# Not reachable from the CLI as it stands, but dividing by it would
+		# turn a nonsense interval into a traceback at startup rather than
+		# into the only sensible reading of it, which is "every poll".
+
+		return 1
+
+	return max(1, int(dTForget / dTPoll))
 
 
 def DriverBuild(
@@ -1071,6 +1284,7 @@ async def NRun(
 	*,
 	dTBrowse: float,
 	dTPoll: float,
+	dTForget: float = FORGET_MISSING_DEFAULT,
 	pathPersistDir: Path | None,
 	nPort: int,
 	strPincode: str | None,
@@ -1108,7 +1322,12 @@ async def NRun(
 	# Built before the bridge, because the bridge takes it. One notifier for
 	# the life of the process — it is what remembers the last line sent.
 
-	bridge = CBridge(driver, dTPoll=dTPoll, notifier=CNotifier())
+	bridge = CBridge(
+		driver,
+		dTPoll=dTPoll,
+		cMissForget=CMissForget(dTForget, dTPoll),
+		notifier=CNotifier(),
+	)
 
 	# One watch for the whole run, opened before anything is bridged. The
 	# startup window is not a separate browse — it is the first `dTBrowse`
