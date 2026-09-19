@@ -275,7 +275,9 @@ class CFixtures:  # tag = fixs
 
 		Unknown fixture types are kept, not dropped — they log a warning at
 		construction and resolve to FIXTUREK.Unknown. Filter on
-		`FIsKnown()` if you need only the ones this library models.
+		`FIsUsable()` if you need only the ones worth surfacing, which also
+		drops the type-4 pseudo-fixture; `FIsKnown()` asks the narrower
+		question of whether this library models the type at all.
 		"""
 
 		return self.LFixtureFromRead(await self.ObjRead(addr), self.trans.strHost)

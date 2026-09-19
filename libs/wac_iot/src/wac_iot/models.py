@@ -26,11 +26,11 @@ g_log = logging.getLogger(__name__)
 
 # Unrecognized types already reported, as (host, type ID) pairs. A consumer
 # that polls rebuilds every fixture on every tick, so a type that is simply a
-# permanent part of the system — the type-4 pseudo-fixture ColorScaping
-# hardware reports — would otherwise warn every few seconds for the life of
-# the process. Measured on a bridge at a 5s interval: about 17,000 identical
-# warnings a day about a condition that will never change. Worth saying once,
-# and only once.
+# permanent part of the system would otherwise warn every few seconds for the
+# life of the process. Measured on a bridge at a 5s interval, back when the
+# type-4 pseudo-fixture still landed here: about 17,000 identical warnings a
+# day about a condition that will never change. Worth saying once, and only
+# once.
 #
 # Keyed by host as well as by ID because the host is in the message: deduping
 # on the ID alone would name whichever device happened to be read first and
@@ -48,6 +48,9 @@ class FIXTUREK(IntEnum):  # tag = fixturek — kinds of fixture
 	The documented IDs are sparse. Anything unrecognized resolves to
 	`Unknown` instead of raising, so one unfamiliar fixture on a track
 	cannot take down a poll of the whole system.
+
+	Not every member is a light, and `Pseudo` is not a fixture at all —
+	`CFixture.FIsUsable()` is the predicate that sorts that out.
 	"""
 
 	Unknown            = -1
@@ -55,6 +58,29 @@ class FIXTUREK(IntEnum):  # tag = fixturek — kinds of fixture
 	TunableWhite       = 1
 	Rgbw               = 2
 	MotorizedTrackhead = 3
+
+	# Not a fixture. Observed on a ColorScaping transformer at firmware
+	# 01.04.0149, where a full dump showed: the untouched default name
+	# `New Fixture 17044171`, absent from the WAC app; `state` and `tune`
+	# both `{}`, so it can neither report nor be controlled; `detail.model`
+	# and `detail.ledDriver` both `gnipacsroloC` — "ColorScaping" reversed;
+	# `detail.fwVer` of `07.68`, exactly the device's own `scmVer`;
+	# `detail.factory` of 41, outside the 1-6 the vendor spec documents; and
+	# `detail.pcbVer` of "\u0001.\u0001", raw bytes where a version string
+	# belongs. The device's own All-Default group (address 255) lists the
+	# three real fixtures and omits it, as does the documented bulk read
+	# (action 3 with `addr` omitted) — it is visible at all only because
+	# `LFixtureReadAll` works around that with an explicit address array
+	# from action 5.
+	#
+	# The inference, and it is inference: this is the transformer's own SCM
+	# appearing in the fixture table as an artifact rather than anything on
+	# the track. One unit on one firmware version, and both the reversed
+	# strings and the `scmVer` match are read, not reported. Named for the
+	# role the evidence does carry — an entry that is not a fixture — rather
+	# than for the SCM guess.
+
+	Pseudo             = 4
 	Elv                = 6
 	WallStation        = 11
 	Controller24V      = 12
@@ -289,9 +315,15 @@ class SDetailMotor(SDetail):  # tag = mdetail
 # ---------------------------------------------------------------------------
 
 # Several documented types are defined only by reference to another type, so
-# ten IDs collapse into six real shapes.
+# the IDs collapse into six real shapes plus the raw passthrough below.
 
 type TShapes = tuple[type[SState], type[STune], type[SDetail]]  # tag = shapes
+
+# Raw passthrough: the permissive bases, which with extra="allow" means
+# nothing the device sent is lost. It is what an unrecognized type falls back
+# to, and what the entries below that model nothing point at deliberately.
+
+g_shapesRaw: TShapes = (SState, STune, SDetail)
 
 g_mpFixturekShapes: dict[FIXTUREK, TShapes] = {
 	FIXTUREK.SingleColor:        (SStateLight, STune,      SDetail),
@@ -308,12 +340,15 @@ g_mpFixturekShapes: dict[FIXTUREK, TShapes] = {
 	FIXTUREK.MotorizedTrackhead: (SStateMotor, STuneMotor, SDetailMotor),
 	FIXTUREK.WallStation:        (SStateWall,  STune,      SDetail),
 	FIXTUREK.Fan:                (SStateFan,   STune,      SDetail),
+
+	# Raw on purpose, not for want of a model: `state` and `tune` are empty
+	# and `detail` carries ordinary-looking fields with nonsense in them, so
+	# there is nothing to model — and a real shape here would claim a
+	# confidence about what this entry *is* that the evidence does not
+	# support. See the FIXTUREK.Pseudo comment.
+
+	FIXTUREK.Pseudo:             g_shapesRaw,
 }
-
-# An unrecognized type still parses — into the permissive bases, which with
-# extra="allow" means nothing is lost.
-
-g_shapesUnknown: TShapes = (SState, STune, SDetail)
 
 
 class CFixture:  # tag = fixture
@@ -358,16 +393,34 @@ class CFixture:  # tag = fixture
 
 				g_log.warning("unrecognized fixture%s: %s", strWhere, self.StrDescribe())
 
-		clsState, clsTune, clsDetail = g_mpFixturekShapes.get(self.fixturek, g_shapesUnknown)
+		clsState, clsTune, clsDetail = g_mpFixturekShapes.get(self.fixturek, g_shapesRaw)
 
 		self.state  = clsState.model_validate(obj.get("state") or {})
 		self.tune   = clsTune.model_validate(obj.get("tune") or {})
 		self.detail = clsDetail.model_validate(obj.get("detail") or {})
 
 	def FIsKnown(self) -> bool:
-		"""False for a fixture type this library does not model."""
+		"""False for a fixture type this library does not model.
+
+		The shape question, and only that: a fixture can be known and still
+		be something no consumer should surface — see `FIsUsable`.
+		"""
 
 		return self.fixturek is not FIXTUREK.Unknown
+
+	def FIsUsable(self) -> bool:
+		"""False for anything a consumer should not build an entity from.
+
+		Two different reasons land here. An unmodeled type, because nothing
+		here can say what kind of entity it deserves; and `Pseudo`, because
+		it is not a fixture at all and an entity made from it could never
+		report or change anything.
+
+		A dump wants `FIsKnown` instead — it is the tool you reach for when
+		one of those two readings turns out to be wrong.
+		"""
+
+		return self.FIsKnown() and self.fixturek is not FIXTUREK.Pseudo
 
 	def StrDescribe(self) -> str:
 		"""One-line human summary, for CLI output and logs."""

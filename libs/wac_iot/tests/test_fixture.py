@@ -211,13 +211,13 @@ class TestReadNamesTheDevice:
 			self.strHost = strHost
 
 		async def ObjAction(self, strUri: str, nAction: int, **kwargs: Any) -> dict[str, Any]:
-			return {"result": "0", "fixture": [{"addr": 1, "type": 4}]}
+			return {"result": "0", "fixture": [{"addr": 1, "type": 99}]}
 
 	def test_an_unknown_type_read_from_a_device_names_it(
 		self, caplog: pytest.LogCaptureFixture
 	) -> None:
-		# Type 4 is the ColorScaping pseudo-fixture, which is exactly the one
-		# that warns on a live bridge.
+		# 99 stands in for a type no firmware here has shown — type 4 used to
+		# play this part and no longer warns, being a named member now.
 
 		models.g_setUnknownSeen.clear()
 

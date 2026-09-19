@@ -56,21 +56,22 @@ class CSnapshot:  # tag = snap
 			if fixture.nAddr is not None
 		}
 
-		# The same, minus the types this library does not model. A consumer
-		# building entities wants this one: the ColorScaping transformer
-		# reports a type-4 pseudo-fixture that is addressable like any other
-		# but carries empty state and tune, so registering it produces a
-		# control that can never report or change anything.
+		# The same, minus everything a consumer should not build an entity
+		# from — which is what a consumer building entities wants. Two kinds
+		# of thing drop out: FIXTUREK.Pseudo, the ColorScaping transformer's
+		# type-4 entry, which is addressable like any other fixture but
+		# carries empty state and tune and is not a fixture at all; and a
+		# genuinely new type from later firmware, because nothing here can
+		# decide what kind of entity an unmodeled type deserves.
 		#
-		# This also excludes a genuinely new fixture type from later
-		# firmware. That is the intended reading — a consumer cannot decide
-		# what kind of entity an unmodeled type deserves. Use mpAddrFixture
+		# The name predates the split and stays: it is public API, and
+		# "known" is still what a consumer means by it. Use mpAddrFixture
 		# when you want everything, as a dump or a diagnostic does.
 
 		self.mpAddrFixtureKnown = {
 			nAddr: fixture
 			for nAddr, fixture in self.mpAddrFixture.items()
-			if fixture.FIsKnown()
+			if fixture.FIsUsable()
 		}
 
 	def StrDeviceId(self) -> str:

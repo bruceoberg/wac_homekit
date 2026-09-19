@@ -66,8 +66,10 @@ device rather than reached on its own. `CSnapshot` gives you the split, along
 with identifiers stable across a rename or a DHCP lease.
 
 `mpAddrFixtureKnown` rather than `mpAddrFixture`: some hardware reports a
-pseudo-fixture with empty state, and this library would rather hide it than
-hand you an entity that can never report or change anything.
+pseudo-fixture with empty state (`FIXTUREK.Pseudo`, the ColorScaping type-4
+entry), and this library would rather hide it than hand you an entity that can
+never report or change anything. The full map keeps it, which is what `wac_iot
+dump` reads.
 
 ## Values are in device units, deliberately
 

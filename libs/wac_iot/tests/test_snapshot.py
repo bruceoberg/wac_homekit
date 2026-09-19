@@ -55,8 +55,11 @@ class TestSnapshotKeying:
 
 
 class TestSnapshotKnownFilter:
-	def test_unmodeled_type_is_excluded(self) -> None:
-		"""Observed on hardware: type 4 is addressable but carries empty state."""
+	def test_pseudo_fixture_is_excluded_but_not_dropped(self) -> None:
+		"""Observed on hardware: type 4 is addressable but carries empty state.
+
+		It stays in the full map, which is what a dump reads.
+		"""
 
 		snap = SnapMake(
 			"AABBCC09FFFD",
@@ -65,6 +68,18 @@ class TestSnapshotKnownFilter:
 		)
 
 		assert set(snap.mpAddrFixture) == {17044171, 100869120}
+		assert set(snap.mpAddrFixtureKnown) == {100869120}
+
+	def test_unmodeled_type_is_excluded(self) -> None:
+		"""A type from later firmware, which nothing here can place."""
+
+		snap = SnapMake(
+			"AABBCC09FFFD",
+			{"addr": 7, "type": 99},
+			{"addr": 100869120, "type": 2, "name": "sky"},
+		)
+
+		assert set(snap.mpAddrFixture) == {7, 100869120}
 		assert set(snap.mpAddrFixtureKnown) == {100869120}
 
 	def test_known_types_all_survive(self) -> None:

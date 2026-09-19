@@ -13,8 +13,22 @@ import argparse
 
 import pytest
 
-from wac_iot import LIGHTMODE, SStateFan, SStateLight, SStateRgbw, SStateWhite, WacValueError
-from wac_iot.cli import LightmodeParse, ObjStateByShape, PrintStateMoved, TplRgbParse
+from wac_iot import (
+	LIGHTMODE,
+	CFixture,
+	SStateFan,
+	SStateLight,
+	SStateRgbw,
+	SStateWhite,
+	WacValueError,
+)
+from wac_iot.cli import (
+	LightmodeParse,
+	ObjStateByShape,
+	PrintFixture,
+	PrintStateMoved,
+	TplRgbParse,
+)
 
 
 class TestTplRgbParse:
@@ -120,3 +134,34 @@ class TestPrintStateMoved:
 		PrintStateMoved({}, {"mixColorTemp": 3000})
 
 		assert "mixColorTemp: None -> 3000" in capsys.readouterr().out
+
+
+class TestPrintFixture:
+	"""What a dump marks, which is the opposite of what a consumer hides."""
+
+	def test_pseudo_fixture_is_named_and_still_printed(
+		self, capsys: pytest.CaptureFixture[str]
+	) -> None:
+		# A dump is the recourse if the pseudo-fixture reading is ever wrong,
+		# so it must say what it thinks type 4 is and print it anyway.
+
+		PrintFixture(CFixture({"addr": 17044171, "type": 4, "detail": {"model": "gnipacsroloC"}}))
+
+		strOut = capsys.readouterr().out
+
+		assert "pseudo-fixture" in strOut
+		assert "gnipacsroloC" in strOut
+
+	def test_unmodeled_type_keeps_its_own_marker(
+		self, capsys: pytest.CaptureFixture[str]
+	) -> None:
+		PrintFixture(CFixture({"addr": 1, "type": 99}))
+
+		assert "not modeled" in capsys.readouterr().out
+
+	def test_a_real_fixture_is_marked_neither_way(
+		self, capsys: pytest.CaptureFixture[str]
+	) -> None:
+		PrintFixture(CFixture({"addr": 1, "type": 2}))
+
+		assert "!!" not in capsys.readouterr().out

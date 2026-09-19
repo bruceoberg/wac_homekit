@@ -102,12 +102,29 @@ inbound TCP on its own port too.
   `WAC_WCT_xxxxxx` (wall station) and `WAC_CS_xxxxxx` (ColorScaping). The
   stable part is the trailing six hex digits of the station MAC; parse that,
   do not match a prefix.
-- **Fixture type 4 exists**, despite the document skipping it. Its `detail` is
-  corrupt — model and driver strings arrive byte-reversed (`gnipacsroloC`),
-  with a nonsense date code and control characters in `pcbVer`. It has empty
-  `state` and `tune` and is excluded from the All-Default group, so it is
-  likely the controller appearing as a pseudo-fixture. Unknown types must log
-  and resolve, never raise.
+- **Fixture type 4 exists**, despite the document skipping it, and it is not a
+  fixture. Named `FIXTUREK.Pseudo` — for the role the evidence carries rather
+  than for the inference below. Observed on a ColorScaping transformer at
+  firmware 01.04.0149: the untouched default name `New Fixture 17044171` and
+  absent from the WAC app; `state` and `tune` both `{}`, so it can neither
+  report nor be controlled; `detail.model` and `detail.ledDriver` both
+  `gnipacsroloC`, i.e. "ColorScaping" reversed; `detail.fwVer` of `07.68`,
+  exactly the device's own `scmVer`; `detail.factory` of 41, outside the
+  documented 1–6; `detail.pcbVer` of `"\u0001.\u0001"`, raw bytes where a
+  version string belongs. The All-Default group (address 255) omits it, and so
+  does the documented bulk read — only `LFixtureReadAll`'s explicit address
+  array surfaces it at all.
+
+  **The reading, and it is a reading:** the transformer's own SCM appearing in
+  the fixture table as an artifact rather than anything on the track. One unit
+  on one firmware version; the reversed strings and the `scmVer` match are
+  inference, not report. It carries the raw passthrough shapes for that reason
+  — a real model would claim a confidence nothing here has earned — and
+  `wac_iot dump` marks it as a pseudo-fixture and prints its raw structures,
+  which is the recourse if the reading ever turns out wrong.
+
+  Genuinely unknown types (anything still unnamed) must log and resolve, never
+  raise.
 - `result` is documented as a String and observed as `"0"`. Parse both string
   and numeric forms.
 - mDNS TXT keys do contain literal spaces, as documented: `Firmware Ver`,
@@ -413,6 +430,14 @@ control was a real user toggle that never reached the hardware.
   but has empty `state`, so it would become an entity that can never report or
   change anything. The known map drops it, and drops any future type this
   library does not model yet. Use the full map only for dumps and diagnostics.
+
+  **Two predicates, deliberately.** `CFixture.FIsKnown()` is the shape
+  question — is there a model for this type. `FIsUsable()` is the surfacing
+  question, and is false for both an unmodeled type and `FIXTUREK.Pseudo`,
+  which is known precisely well enough to say it should not become an entity.
+  `mpAddrFixtureKnown` filters on the second. A diagnostic wants the first,
+  because a dump of the pseudo-fixture is the only way to find out the reading
+  above was wrong.
 - Not every device implements every endpoint. The wall stations answer only
   `/device`, `/network`, `/ota`, and `/fs`, and return HTTP 404 with a plain
   text body for `/fixture`, `/group`, and `/automation`. Tools must degrade

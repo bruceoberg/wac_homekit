@@ -50,6 +50,7 @@ def test_light_types_get_a_tier(fixturek: FIXTUREK, tier: LIGHTTIER) -> None:
 		FIXTUREK.MotorizedTrackhead,
 		FIXTUREK.WallStation,
 		FIXTUREK.Fan,
+		FIXTUREK.Pseudo,
 		FIXTUREK.Unknown,
 	],
 )

@@ -41,6 +41,7 @@ from .discovery import LDiscoBrowse
 from .errors import WacError, WacValueError
 from .fixture import CFixtures
 from .models import (
+	FIXTUREK,
 	LIGHTMODE,
 	CFixture,
 	SState,
@@ -112,7 +113,16 @@ def PrintFixture(fixture: CFixture) -> None:
 	print()
 	print(f"  {fixture.StrDescribe()}")
 
-	if not fixture.FIsKnown():
+	# A dump marks what a consumer hides. The pseudo-fixture reading is an
+	# inference from one unit on one firmware version (see FIXTUREK.Pseudo),
+	# and this is the tool you would reach for if it ever turned out wrong —
+	# so it says what it thinks the entry is and prints the raw structures
+	# anyway, rather than going quiet the way the bridge does.
+
+	if fixture.fixturek is FIXTUREK.Pseudo:
+		print("  !! pseudo-fixture — reported by the transformer but not a fixture; "
+			"raw structures follow")
+	elif not fixture.FIsKnown():
 		print("  !! type not modeled by this library — raw structures follow")
 
 	for strLabel, model in (
