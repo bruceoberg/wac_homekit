@@ -252,6 +252,30 @@ yet, by someone who has not read any of this.
   browsers. Its only job is to let the ordinary case — devices already
   present — come up populated rather than popping in one at a time after a
   controller has already connected.
+- **Not every device that answers discovery is a transformer.** An InvisiLED
+  wall station advertises byte-for-byte what a ColorScaping transformer does,
+  so `CWatcher` reports it and `FTryAddDevice` has to open a client to find
+  out — and before this it found out by way of an HTTP 404, logged at error,
+  on every announcement for the life of the process. `wac_iot` now answers
+  the question from the device's own `systemType` and raises
+  `WacNoFixturesError` instead; the bridge catches that ahead of `WacError`,
+  says so **once at info** — it is a correctly-identified device doing what it
+  should, not a fault — and remembers it in `setStrNoFixtures` so a
+  re-announcement short-circuits before opening anything.
+
+  Keyed on the MAC tail, falling back to the mDNS name: not on the address,
+  which DHCP moves, and remembering the same box twice would mean asking it
+  again. Process-lifetime and never persisted, because a restart re-probing
+  every device costs one request each and is the recovery path if a firmware
+  update ever gives one of these a real `/fixture`.
+
+  **Distinct from `no light fixtures, skipping`**, which is a transformer
+  carrying nothing — it may have a fixture commissioned onto it at any moment,
+  so it is never remembered and its next announcement gets a fresh look. A
+  failed poll is distinct from both, still logs at error, and is still
+  retried: a rebooting transformer must never be skipped permanently, which is
+  why the memory is keyed on a positive identification rather than on a
+  failure.
 - **Runtime additions go through one path, whatever noticed them.** A device
   the watch finds and a fixture the poll finds both end at `_CFaccAdd`, which
   builds accessories for whatever the device has and this bridge does not.

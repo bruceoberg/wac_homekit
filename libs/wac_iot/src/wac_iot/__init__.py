@@ -60,6 +60,7 @@ from .errors import (
 	ResultFromAny,
 	WacDeviceError,
 	WacError,
+	WacNoFixturesError,
 	WacResponseError,
 	WacTimeoutError,
 	WacTransportError,
@@ -123,6 +124,14 @@ __all__ = [
 	"WacTimeoutError",
 	"WacResponseError",
 	"WacValueError",
+
+	# Raised by SnapPoll for a device that answers /device and hosts no
+	# fixtures — a wall station, which discovery cannot tell from a
+	# transformer. Catch it ahead of WacError to skip such a device quietly
+	# rather than reporting a 404 it was always going to give.
+
+	"WacNoFixturesError",
+
 	"RESULT",
 	"ErrFromResponse",
 	"ResultFromAny",

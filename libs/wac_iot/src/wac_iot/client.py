@@ -13,6 +13,7 @@ from typing import Any
 import aiohttp
 
 from .device import CDevice
+from .errors import WacNoFixturesError
 from .fixture import CFixtures
 from .snapshot import CSnapshot
 from .transport import CTransport
@@ -116,9 +117,19 @@ class CClient:  # tag = client
 		does not work. Collapsing them here keeps that from being every
 		consumer's problem — a Home Assistant coordinator's update method
 		becomes this line and nothing else.
+
+		Raises `WacNoFixturesError` for a device whose system type says it
+		hosts none — an InvisiLED wall station, which 404s /fixture. Asked
+		here rather than left to the consumer, because the alternative is
+		every consumer receiving a bare HTTP 404 and having to work out for
+		itself that the device is fine and simply not that kind of device.
 		"""
 
 		devi = await self.device.DeviQuery()
+
+		if not devi.FIsFixtureHost():
+			raise WacNoFixturesError(devi.systemType)
+
 		lFixture = await self.fixture.LFixtureReadAll()
 
 		return CSnapshot(devi, lFixture)

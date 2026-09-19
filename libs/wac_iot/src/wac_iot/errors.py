@@ -138,6 +138,25 @@ class WacValueError(WacError):
 	"""
 
 
+class WacNoFixturesError(WacError):
+	"""The device is a kind of system that has no fixtures to read.
+
+	An InvisiLED wall station advertises the same service, protocol and
+	protocol version as a ColorScaping transformer, answers `/device` with a
+	well-formed body, and returns HTTP 404 on everything else. Reading its
+	fixtures therefore fails as a bare transport error that reads like a
+	broken device rather than a correctly-identified one that was never
+	going to have any — so the system type it reports about itself is
+	checked first and this is raised instead. See
+	`SDeviceInfo.FIsFixtureHost`.
+	"""
+
+	def __init__(self, strSystemType: str) -> None:
+		super().__init__(f"system type {strSystemType!r} hosts no fixtures")
+
+		self.strSystemType = strSystemType  # as reported, so a caller can name it
+
+
 class WacResponseError(WacError):
 	"""The device answered, but the body was not something we can read.
 

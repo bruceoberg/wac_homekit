@@ -30,7 +30,16 @@ from pyhap.accessory_driver import AccessoryDriver
 from pyhap.encoder import AccessoryEncoder
 from pyhap.hap_handler import HAPServerHandler
 
-from wac_iot import DISCOK, CClient, CSnapshot, CWatcher, SDevent, SDisco, WacError
+from wac_iot import (
+	DISCOK,
+	CClient,
+	CSnapshot,
+	CWatcher,
+	SDevent,
+	SDisco,
+	WacError,
+	WacNoFixturesError,
+)
 
 from .accessory import AID_MAX, AID_MIN, CFixtureAccessory, TierTryFromFixturek
 from .netiface import StrAddrResolve
@@ -223,6 +232,18 @@ class CDevicePoll:  # tag = dpoll
 		return setNAddrForget
 
 
+def StrDiscoKey(disco: SDisco) -> str:
+	"""What a discovered device is remembered as, across announcements.
+
+	The tail of its MAC, which is the part of an mDNS instance name that does
+	not move, falling back to the whole name when the tail could not be
+	parsed. Deliberately not the address: DHCP moves that, and the whole
+	point of remembering a device is to still recognize it at a new one.
+	"""
+
+	return disco.strMacSuffix or disco.strHost
+
+
 class CBridge(Bridge):  # tag = bridge
 	"""Every light on every discovered device, behind one HomeKit bridge."""
 
@@ -259,6 +280,24 @@ class CBridge(Bridge):  # tag = bridge
 
 		self.mpStrDpoll: dict[str, CDevicePoll] = {}
 
+		# Devices identified as hosting no fixtures — an InvisiLED wall
+		# station, which advertises the same service, protocol and protocol
+		# version a transformer does and only says otherwise once asked. Kept
+		# so a re-announcement short-circuits before opening a client, and so
+		# the line about it is said once rather than every time mDNS repeats
+		# itself.
+		#
+		# Instance state rather than the module-level seen-set `CFixture` uses
+		# for its unknown-type warning, because this one gates work and not
+		# only logging: a set shared by every bridge in the process would mean
+		# one bridge's verdict silently skipping a device for another.
+		#
+		# Process-lifetime, deliberately never persisted. A restart re-probes
+		# everything, which costs one request per device and is the recovery
+		# path if a firmware update ever gives one of these a real /fixture.
+
+		self.setStrNoFixtures: set[str] = set()
+
 		# Whether the driver is serving yet. Before it is, there is no
 		# advertisement to update and no controller to tell — see
 		# `_ConfigChanged`.
@@ -291,14 +330,28 @@ class CBridge(Bridge):  # tag = bridge
 
 			return False
 
+		strKey = StrDiscoKey(disco)
+
+		if strKey in self.setStrNoFixtures:
+			# Already asked, and it answered that it hosts none. Nothing here
+			# will ever change its mind — see `setStrNoFixtures`.
+
+			g_log.debug("%s: hosts no fixtures", disco.strHost)
+
+			return False
+
 		if not disco.strIp:
 			g_log.error("%s: advertised no address, skipping", disco.strHost)
 
 			return False
 
-		# Deliberately not disco.nPort. mDNS advertises 443 on every device
-		# measured, and 443 refuses the connection on every device measured;
-		# the library's own default of plain HTTP on 80 is the one that works.
+		# Deliberately not disco.nPort, and deliberately not a discriminator
+		# either. Measured: the ColorScaping transformer on firmware
+		# 01.04.0149 advertises 80, the InvisiLED wall station advertises 443
+		# and then refuses the connection on it. Plain HTTP on 80 — the
+		# library's own default — is what serves the interface on both, so
+		# what gets advertised tracks firmware generation rather than what the
+		# device can do. `systemType` is what tells these two apart.
 
 		client = CClient(disco.strIp, dTTimeout=POLL_TIMEOUT, cRetry=POLL_RETRY)
 
@@ -306,6 +359,19 @@ class CBridge(Bridge):  # tag = bridge
 			await client.Open()
 			snap = await client.SnapPoll()
 			strDeviceId = snap.StrDeviceId()
+		except WacNoFixturesError as exc:
+			# Not an error, and logged as such: a correctly-identified device
+			# doing exactly what it should. Discovery cannot tell a wall
+			# station from a transformer, so the only way to find out was to
+			# ask — and having asked, remember, or every announcement it makes
+			# for the life of the process opens another client to be told the
+			# same thing.
+
+			g_log.info("%s: %s, skipping", disco.strHost, exc)
+			self.setStrNoFixtures.add(strKey)
+			await client.Close()
+
+			return False
 		except WacError as exc:
 			g_log.error("%s: could not be read, skipping: %s", disco.strIp, exc)
 			await client.Close()

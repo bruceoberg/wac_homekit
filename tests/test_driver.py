@@ -20,7 +20,13 @@ from pyhap.hap_handler import HAPServerHandler
 from pyhap.loader import Loader
 from pyhap.state import State
 
-from wac_iot import WacTransportError
+from wac_iot import (
+	CSnapshot,
+	SDeviceInfo,
+	SDisco,
+	WacNoFixturesError,
+	WacTransportError,
+)
 
 from wac_homekit.driver import (
 	PERSIST_DIR_NAME,
@@ -697,3 +703,181 @@ class TestCFaccForget:
 		assert self.ADDR in dpoll.mpAddrFacc
 		assert not dpoll.mpAddrCMiss
 		assert not driver.cConfigChanged
+
+
+class CClientNoFixtures:  # tag = client
+	"""A CClient as far as FTryAddDevice reaches into it.
+
+	Counts its own construction, because the thing being tested about a
+	device already identified as hosting nothing is that no client is built
+	for it at all.
+	"""
+
+	lStrHost: list[str] = []
+
+	def __init__(self, strHost: str, **kwargs: Any) -> None:
+		CClientNoFixtures.lStrHost.append(strHost)
+
+		self.strHost = strHost
+		self.cClosed = 0
+
+	async def Open(self) -> None:
+		pass
+
+	async def Close(self) -> None:
+		self.cClosed += 1
+
+	async def SnapPoll(self) -> CSnapshot:
+		raise NotImplementedError
+
+
+def DiscoMake(strHost: str, strIp: str, strMacSuffix: str | None) -> SDisco:
+	return SDisco(strHost=strHost, strIp=strIp, strMacSuffix=strMacSuffix, nPort=443)
+
+
+def SnapMake(strStaMac: str) -> CSnapshot:
+	"""A device that answered and listed no fixtures at all.
+
+	Real rather than stubbed: FTryAddDevice asks it for the device id, which
+	is the identifier every accessory ends up hanging off.
+	"""
+
+	return CSnapshot(SDeviceInfo.model_validate({"staMac": strStaMac}), [])
+
+
+class TestFTryAddDeviceNoFixtures:
+	"""A wall station is not a broken transformer.
+
+	It advertises `_easylink._tcp` with the same protocol and protocol
+	version a ColorScaping transformer does, so discovery cannot tell them
+	apart and the only way to find out is to ask. Having asked once, the
+	bridge must not keep asking: an announcement every few minutes for the
+	life of the process would otherwise open a client every time to be told
+	the same thing.
+	"""
+
+	DISCO_WALL = DiscoMake("WAC_WCT_09FFFD", "10.10.10.248", "09FFFD")
+	DISCO_HUB = DiscoMake("WAC_CS_09FFFE", "10.10.10.249", "09FFFE")
+
+	@pytest.fixture(autouse=True)
+	def ClientPatched(self, monkeypatch: pytest.MonkeyPatch) -> type[CClientNoFixtures]:
+		CClientNoFixtures.lStrHost = []
+		monkeypatch.setattr("wac_homekit.driver.CClient", CClientNoFixtures)
+
+		return CClientNoFixtures
+
+	def BridgeBuild(self) -> CBridge:
+		return CBridge(CDriverForgetStub(), dTPoll=5.0)  # type: ignore[arg-type]
+
+	def SnapPollSet(self, monkeypatch: pytest.MonkeyPatch, objResult: Any) -> None:
+		"""Make every stub client answer one way — a snapshot or an exception."""
+
+		async def SnapPoll(self: CClientNoFixtures) -> CSnapshot:
+			if isinstance(objResult, Exception):
+				raise objResult
+
+			return objResult  # type: ignore[no-any-return]
+
+		monkeypatch.setattr(CClientNoFixtures, "SnapPoll", SnapPoll)
+
+	def test_a_wall_station_is_reported_once_at_info(
+		self,
+		monkeypatch: pytest.MonkeyPatch,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""INFO, not ERROR: a correctly-identified device doing what it should."""
+
+		self.SnapPollSet(monkeypatch, WacNoFixturesError("invisiLED_Wall"))
+		bridge = self.BridgeBuild()
+
+		with caplog.at_level("INFO", logger="wac_homekit.driver"):
+			assert not asyncio.run(bridge.FTryAddDevice(self.DISCO_WALL))
+
+		assert len(caplog.records) == 1
+		assert caplog.records[0].levelname == "INFO"
+		assert "invisiLED_Wall" in caplog.records[0].getMessage()
+
+	def test_a_second_announcement_opens_no_client_and_says_nothing(
+		self,
+		monkeypatch: pytest.MonkeyPatch,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		self.SnapPollSet(monkeypatch, WacNoFixturesError("invisiLED_Wall"))
+		bridge = self.BridgeBuild()
+
+		asyncio.run(bridge.FTryAddDevice(self.DISCO_WALL))
+
+		with caplog.at_level("INFO", logger="wac_homekit.driver"):
+			assert not asyncio.run(bridge.FTryAddDevice(self.DISCO_WALL))
+
+		assert not caplog.records
+		assert CClientNoFixtures.lStrHost == ["10.10.10.248"]
+
+	def test_it_is_remembered_by_mac_not_by_address(
+		self,
+		monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		"""A DHCP lease change re-announces the same box somewhere else, and
+		it is still the same box."""
+
+		self.SnapPollSet(monkeypatch, WacNoFixturesError("invisiLED_Wall"))
+		bridge = self.BridgeBuild()
+
+		asyncio.run(bridge.FTryAddDevice(self.DISCO_WALL))
+		asyncio.run(bridge.FTryAddDevice(DiscoMake("WAC_WCT_09FFFD", "10.10.10.99", "09FFFD")))
+
+		assert CClientNoFixtures.lStrHost == ["10.10.10.248"]
+
+	def test_a_device_with_no_mac_suffix_falls_back_to_its_name(
+		self,
+		monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		self.SnapPollSet(monkeypatch, WacNoFixturesError("invisiLED_Wall"))
+		bridge = self.BridgeBuild()
+
+		disco = DiscoMake("something-unparseable", "10.10.10.248", None)
+
+		asyncio.run(bridge.FTryAddDevice(disco))
+		asyncio.run(bridge.FTryAddDevice(disco))
+
+		assert CClientNoFixtures.lStrHost == ["10.10.10.248"]
+
+	def test_a_fixture_host_with_nothing_on_it_is_a_different_condition(
+		self,
+		monkeypatch: pytest.MonkeyPatch,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""A transformer carrying no light is still a transformer — it may
+		have one commissioned onto it at any moment, so it is never skipped
+		and its next announcement gets a fresh look."""
+
+		self.SnapPollSet(monkeypatch, SnapMake("AABBCC09FFFE"))
+		bridge = self.BridgeBuild()
+
+		with caplog.at_level("INFO", logger="wac_homekit.driver"):
+			assert not asyncio.run(bridge.FTryAddDevice(self.DISCO_HUB))
+			assert not asyncio.run(bridge.FTryAddDevice(self.DISCO_HUB))
+
+		assert not bridge.setStrNoFixtures
+		assert CClientNoFixtures.lStrHost == ["10.10.10.249", "10.10.10.249"]
+		assert [rec.levelname for rec in caplog.records] == ["WARNING", "WARNING"]
+
+	def test_a_genuine_failure_still_logs_at_error_and_is_retried(
+		self,
+		monkeypatch: pytest.MonkeyPatch,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""A rebooting transformer must never be skipped permanently — the
+		whole reason the memory is keyed on a positive identification rather
+		than on a failure."""
+
+		self.SnapPollSet(monkeypatch, WacTransportError("connection reset"))
+		bridge = self.BridgeBuild()
+
+		with caplog.at_level("INFO", logger="wac_homekit.driver"):
+			assert not asyncio.run(bridge.FTryAddDevice(self.DISCO_HUB))
+			assert not asyncio.run(bridge.FTryAddDevice(self.DISCO_HUB))
+
+		assert not bridge.setStrNoFixtures
+		assert CClientNoFixtures.lStrHost == ["10.10.10.249", "10.10.10.249"]
+		assert [rec.levelname for rec in caplog.records] == ["ERROR", "ERROR"]

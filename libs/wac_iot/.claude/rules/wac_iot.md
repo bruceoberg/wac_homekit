@@ -52,8 +52,15 @@ document describes protocol 1.91, so expect further drift on newer firmware —
 re-run `wac_iot dump` rather than assuming these hold.
 
 - **The interface is plain HTTP on port 80.** Port 443 refuses the connection
-  outright on every device tested, even though mDNS advertises it. There is no
-  TLS and no certificate to deal with. `wac_iot probe` re-checks this.
+  outright on every device tested. There is no TLS and no certificate to deal
+  with. `wac_iot probe` re-checks this.
+
+  **The advertised port is not a statement about any of that.** The wall
+  stations advertise 443 and then refuse it; the ColorScaping transformer on
+  `iotmVer 01.04.0149` advertises 80. So mDNS disagrees with itself across the
+  fleet, and what it says tracks firmware generation rather than what the
+  device serves. Ignore `nPort` and use 80 — and never make the port a
+  discriminator between device kinds.
 
 #### When discovery finds nothing
 
@@ -410,6 +417,22 @@ control was a real user toggle that never reached the hardware.
   `/device`, `/network`, `/ota`, and `/fs`, and return HTTP 404 with a plain
   text body for `/fixture`, `/group`, and `/automation`. Tools must degrade
   per-endpoint instead of aborting the run.
+
+  **`/device` says which kind it is, and that is the only thing that does.** A
+  wall station advertises `_easylink._tcp` with `Protocol:
+  com.waclighting.strut` and `Protocol Ver: 1.40` — byte for byte what a
+  ColorScaping transformer advertises — so discovery cannot tell them apart
+  and a consumer that assumes otherwise gets a 404 on every announcement,
+  forever. Its `/device` body carries `"systemType": "invisiLED_Wall"` and
+  `"deviceName": "wallstation"`. `SDeviceInfo.FIsFixtureHost` reads the first
+  of those and `SnapPoll` raises `WacNoFixturesError` rather than making a
+  request that was always going to 404.
+
+  That predicate is a **denylist**, deliberately. The document enumerates
+  `systemType` as strut / colorscaping / gen3fan, and this device reports none
+  of the three — so the documented enumeration is already incomplete, and an
+  allowlist would silently drop the next product WAC ships. Unknown, absent,
+  or not even a string all answer "yes, it hosts fixtures".
 - **Wall stations are not reachable as fixtures over REST.** Even fully
   commissioned through the WAC app, an InvisiLED wall station exposes no
   fixture, group, remote, or input endpoint — only its own identity. It does

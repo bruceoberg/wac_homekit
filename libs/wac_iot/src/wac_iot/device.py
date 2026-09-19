@@ -17,6 +17,20 @@ from .transport import CTransport
 
 URI = "/device"
 
+# System types known to carry no fixtures at all. Currently just the InvisiLED
+# wall station, which answers /device and returns HTTP 404 on /fixture,
+# /group and /automation.
+#
+# A denylist rather than an allowlist, deliberately. The document enumerates
+# systemType as strut / colorscaping / gen3fan, and this device reports none
+# of the three — so that enumeration is already incomplete, and an allowlist
+# would silently drop the next product WAC ships. Anything unrecognized has to
+# answer "yes, read its fixtures" and be wrong at worst once.
+#
+# Lowercased, because the only comparison made against it is folded.
+
+g_setStrSystemNoFixture = {"invisiled_wall"}
+
 
 class SNwkState(SWac):  # tag = nwks
 	"""Network status, as reported inside a device query."""
@@ -72,6 +86,26 @@ class SDeviceInfo(SWac):  # tag = devi
 	# says otherwise.
 
 	systemSpecificParams: Any = None
+
+	def FIsFixtureHost(self) -> bool:
+		"""Whether this system is the kind that carries fixtures.
+
+		Discovery cannot answer this — an InvisiLED wall station advertises
+		the same service, protocol and protocol version as a ColorScaping
+		transformer. The device says so about itself here, and this is the
+		cheapest place to ask, before a fixture read turns into a 404 that
+		looks like a fault.
+
+		False only for the handful of system types known to host nothing; see
+		`g_setStrSystemNoFixture`. A missing, unrecognized, or non-string
+		systemType all answer True — the field is documented as a number and
+		observed as a string, so a value that is neither must not raise here.
+		"""
+
+		if not isinstance(self.systemType, str):
+			return True
+
+		return self.systemType.strip().lower() not in g_setStrSystemNoFixture
 
 
 class CDevice:  # tag = device
