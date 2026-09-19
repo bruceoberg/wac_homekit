@@ -190,3 +190,109 @@ def test_notifier_sends_the_formatted_status() -> None:
 	notif.Notify(status)
 
 	assert lStrSent == [f"STATUS={StrStatus(status)}"]
+
+
+# ---------------------------------------------------------------------------
+# CNotifier — periodic resend
+# ---------------------------------------------------------------------------
+
+
+class CClockFake:  # tag = clock
+	"""A monotonic clock a test can jump forward in, instead of sleeping."""
+
+	def __init__(self) -> None:
+		self.t = 1000.0
+
+	def __call__(self) -> float:
+		return self.t
+
+
+def test_notifier_resends_an_unchanged_refreshable_status_once_the_interval_passes() -> None:
+	# The nineteen-hour blank `Status:` field this exists for: the startup
+	# datagram was lost, and with nothing changing afterwards nothing was
+	# ever sent again.
+
+	lStrSent: list[str] = []
+	clock = CClockFake()
+	notif = CNotifier(lStrSent.append, dTResend=60.0, fnTime=clock)
+
+	status = StatusMake(strPincode="123-45-678")
+
+	notif.Notify(status, fRefresh=True)
+
+	clock.t += 60.0
+
+	notif.Notify(status, fRefresh=True)
+
+	assert len(lStrSent) == 2
+
+
+def test_notifier_does_not_resend_before_the_interval_has_passed() -> None:
+	# Twelve an hour is the accepted cost; one per poll tick is not.
+
+	lStrSent: list[str] = []
+	clock = CClockFake()
+	notif = CNotifier(lStrSent.append, dTResend=60.0, fnTime=clock)
+
+	status = StatusMake(strPincode="123-45-678")
+
+	notif.Notify(status, fRefresh=True)
+
+	for _ in range(11):
+		clock.t += 5.0
+
+		notif.Notify(status, fRefresh=True)
+
+	assert len(lStrSent) == 1
+
+
+def test_notifier_never_resends_an_unchanged_paired_status() -> None:
+	# A paired line is informational and carries no setup code, so a stale
+	# one costs nothing and is not worth a datagram.
+
+	lStrSent: list[str] = []
+	clock = CClockFake()
+	notif = CNotifier(lStrSent.append, dTResend=60.0, fnTime=clock)
+
+	status = StatusMake(cClientPaired=1)
+
+	notif.Notify(status)
+
+	clock.t += 3600.0
+
+	notif.Notify(status)
+
+	assert len(lStrSent) == 1
+
+
+def test_notifier_resends_the_formatted_status() -> None:
+	# A resend is the same line, not a bare marker — it is replacing the one
+	# systemd is showing.
+
+	lStrSent: list[str] = []
+	clock = CClockFake()
+	notif = CNotifier(lStrSent.append, dTResend=60.0, fnTime=clock)
+
+	status = StatusMake(strPincode="123-45-678", cLightOffline=1)
+
+	notif.Notify(status, fRefresh=True)
+
+	clock.t += 60.0
+
+	notif.Notify(status, fRefresh=True)
+
+	assert lStrSent == [f"STATUS={StrStatus(status)}"] * 2
+
+
+def test_notifier_sends_a_change_without_waiting_for_the_interval() -> None:
+	# The resend is additive. A status that moved still goes out on the tick
+	# it moved, whatever the clock says.
+
+	lStrSent: list[str] = []
+	clock = CClockFake()
+	notif = CNotifier(lStrSent.append, dTResend=60.0, fnTime=clock)
+
+	notif.Notify(StatusMake(strPincode="123-45-678"), fRefresh=True)
+	notif.Notify(StatusMake(strPincode="123-45-678", cLightOffline=1), fRefresh=True)
+
+	assert len(lStrSent) == 2

@@ -25,6 +25,7 @@ that line and this file have to be changed together.
 
 from __future__ import annotations  # Forward refs without quotes
 
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -98,23 +99,57 @@ def StrStatus(status: SStatus) -> str:
 
 
 class CNotifier:  # tag = notif
-	"""Sends a status line to systemd, and not the same one twice in a row.
+	"""Sends a status line to systemd on change, and repeats the ones that matter.
 
 	The poll loop calls this every five seconds for the life of the process,
-	and the common case is that nothing moved. Suppressing the resend keeps
-	an strace of this bridge down to the ticks where something actually
-	changed, and costs one string comparison to do it.
+	and the common case is that nothing moved, so an unchanged line is
+	normally dropped for one string comparison.
+
+	**Unchanged is not the same as delivered.** A `STATUS=` datagram is fire
+	and forget: nothing acknowledges it and nothing retries it, and one going
+	missing has been measured — a bridge sent its single unpaired line at
+	startup, the datagram never arrived, nothing changed afterwards, and
+	`systemctl status` showed a blank `Status:` field for nineteen hours. The
+	next state change sent the paired line and it landed. So a caller may mark
+	a status as eligible for periodic resend with `fRefresh`, and this class
+	owns the interval and the clock that decide when one goes out.
+
+	Only the unpaired line earns that: it carries the setup code, which is the
+	one thing someone reads this field to get. A paired line is informational
+	and a stale one costs nothing, so it still sends on change alone.
+
+	The cost is twelve extra datagrams an hour while unpaired, which was
+	weighed and accepted. Note it is not a logging-volume change — `STATUS=`
+	replaces a field systemd holds and writes no journal lines — the only
+	thing it makes noisier is an strace.
 
 	`fnNotify` is the seam. Left as None it builds a `SystemdNotifier` once
 	and uses its `notify`, which with no `$NOTIFY_SOCKET` in the environment
 	— every dev run, every test run — swallows the failure and does nothing.
 	Tests pass a list-appending fake instead and never go near a socket.
+
+	`fnTime` is the same seam for the clock, so a test can jump an hour
+	without sleeping through it.
 	"""
 
-	def __init__(self, fnNotify: Callable[[str], None] | None = None) -> None:
+	def __init__(
+		self,
+		fnNotify: Callable[[str], None] | None = None,
+		dTResend: float = 60.0,
+		fnTime: Callable[[], float] = time.monotonic,
+	) -> None:
 		self.fnNotify: Callable[[str], None] = (
 			fnNotify if fnNotify is not None else sdnotify.SystemdNotifier().notify
 		)
+
+		# How long an eligible status waits before it goes out again. Held as
+		# a duration rather than as a count of ticks: a tick count would
+		# quietly mean something else the day the poll interval changes or a
+		# third caller appears, and there are already three call sites.
+
+		self.dTResend = dTResend
+
+		self.fnTime = fnTime
 
 		# The last line actually sent, so a tick that changed nothing sends
 		# nothing. None means nothing has gone out yet, which is distinct
@@ -122,14 +157,30 @@ class CNotifier:  # tag = notif
 
 		self.strLast: str | None = None
 
-	def Notify(self, status: SStatus) -> None:
-		"""Send this status, unless it is the one already showing."""
+		# When that send happened, on the monotonic clock. Paired with
+		# `strLast` and updated with it, resends included.
+
+		self.tLast: float | None = None
+
+	def Notify(self, status: SStatus, fRefresh: bool = False) -> None:
+		"""Send this status if it moved, or if it is due to be repeated.
+
+		`fRefresh` says this status is *eligible* for the periodic resend
+		above — not that it should go out now. The caller decides which
+		statuses are worth repeating; the interval and the clock are ours.
+		"""
 
 		strStatus = StrStatus(status)
+		tNow = self.fnTime()
 
 		if strStatus == self.strLast:
-			return
+			if not fRefresh:
+				return
+
+			if self.tLast is not None and tNow - self.tLast < self.dTResend:
+				return
 
 		self.strLast = strStatus
+		self.tLast = tNow
 
 		self.fnNotify(f"STATUS={strStatus}")

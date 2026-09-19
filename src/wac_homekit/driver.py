@@ -696,7 +696,17 @@ class CBridge(Bridge):  # tag = bridge
 				cDevice=len(self.mpStrDpoll),
 				cLight=cLight,
 				cLightOffline=cLightOffline,
-			)
+			),
+
+			# An unpaired line is the one worth repeating — it carries the
+			# setup code, and a datagram lost at startup otherwise leaves the
+			# field blank until something else moves. Keyed off the client
+			# count rather than off the pincode, because `StrStatus` decides
+			# pairing off the count for the reason its comment gives and two
+			# definitions of unpaired that can disagree is the last thing
+			# wanted in the status that carries the code.
+
+			fRefresh=not cClientPaired,
 		)
 
 	async def run(self) -> None:
