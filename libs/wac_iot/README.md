@@ -20,8 +20,8 @@ LAN and talk to it directly.
 ## Install
 
 ```sh
-pip install wac-iot            # the library
-pip install wac-iot[discovery] # ... plus mDNS discovery
+pip install wac_iot            # the library
+pip install wac_iot[discovery] # ... plus mDNS discovery
 ```
 
 Discovery is an extra because it is the only part that needs `zeroconf`. A

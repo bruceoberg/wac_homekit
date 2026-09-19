@@ -64,7 +64,7 @@ vs. white point) in one place, and refuse before spending a request.
 
 Everything about the WAC protocol — the confidential vendor spec, the hardware
 measurements that contradict it, and `wac_iot`'s own API contract — lives in
-**`libs/wac_iot/.claude/rules/wac-iot.md`**. It is a nested rule, so it loads
+**`libs/wac_iot/.claude/rules/wac_iot.md`**. It is a nested rule, so it loads
 by itself whenever anything under `libs/wac_iot/` is read; record new hardware
 findings *there* rather than here, so they travel with the library when it is
 extracted. Nothing in that subtree should need a rule at this level.

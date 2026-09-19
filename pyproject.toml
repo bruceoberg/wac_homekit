@@ -11,7 +11,7 @@ dependencies = [
     "ifaddr>=0.2.0",
     "qrcode>=8.2",
     "sdnotify>=0.3.2",
-    "wac-iot[discovery]",
+    "wac_iot[discovery]",
 ]
 
 # Entry point: `uv run wac_homekit` or just `wac_homekit` inside the devenv shell.
@@ -37,7 +37,7 @@ dev = [
 members = ["libs/*"]
 
 [tool.uv.sources]
-wac-iot = { workspace = true }
+wac_iot = { workspace = true }
 
 [tool.mypy]
 files = ["src", "libs"]
