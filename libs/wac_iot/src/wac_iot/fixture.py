@@ -278,26 +278,32 @@ class CFixtures:  # tag = fixs
 		`FIsKnown()` if you need only the ones this library models.
 		"""
 
-		return self.LFixtureFromRead(await self.ObjRead(addr))
+		return self.LFixtureFromRead(await self.ObjRead(addr), self.trans.strHost)
 
 	@staticmethod
-	def LFixtureFromRead(obj: dict[str, Any]) -> list[CFixture]:
+	def LFixtureFromRead(obj: dict[str, Any], strHost: str | None = None) -> list[CFixture]:
 		"""Build fixtures from a response already in hand.
 
 		Separate from `LFixtureRead` so a caller that wants both the raw
 		object and the parsed fixtures does not pay for two requests.
+
+		`strHost` is only carried so an unknown type can say which device it
+		came from. Read live from `self.trans`, so a device that moves to a
+		new lease is named by where it answers now.
 		"""
 
 		objFixtures = obj.get("fixture")
 
 		if isinstance(objFixtures, list):
-			return [CFixture(objOne) for objOne in objFixtures if isinstance(objOne, dict)]
+			return [
+				CFixture(objOne, strHost) for objOne in objFixtures if isinstance(objOne, dict)
+			]
 
 		# A single-address read returns the fixture's fields inline rather
 		# than wrapped in an array.
 
 		if "type" in obj:
-			return [CFixture(obj)]
+			return [CFixture(obj, strHost)]
 
 		return []
 
@@ -316,7 +322,7 @@ class CFixtures:  # tag = fixs
 		if not lAddr:
 			return []
 
-		return self.LFixtureFromRead(await self.ObjRead(lAddr))
+		return self.LFixtureFromRead(await self.ObjRead(lAddr), self.trans.strHost)
 
 	async def LAddrList(self) -> list[int]:
 		"""Action 5, parsed to a list of addresses."""

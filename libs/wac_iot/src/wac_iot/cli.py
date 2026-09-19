@@ -275,7 +275,7 @@ async def DumpRun(args: argparse.Namespace) -> int:
 
 			lAddrSummary = [
 				fixture.nAddr
-				for fixture in CFixtures.LFixtureFromRead(obj)
+				for fixture in CFixtures.LFixtureFromRead(obj, client.strHost)
 				if fixture.nAddr is not None
 			]
 		except WacError as exc:

@@ -20,11 +20,11 @@ from wac_iot import models
 def clear_seen() -> Iterator[None]:
 	"""The warned-about set is process-global, so tests must not inherit it."""
 
-	models.g_setNTypeUnknownSeen.clear()
+	models.g_setUnknownSeen.clear()
 
 	yield
 
-	models.g_setNTypeUnknownSeen.clear()
+	models.g_setUnknownSeen.clear()
 
 
 class TestUnknownTypes:
@@ -59,6 +59,29 @@ class TestUnknownTypes:
 				CFixture({"addr": 1, "type": nType})
 
 		assert len(caplog.records) == 3
+
+	def test_unknown_type_names_the_device_it_came_from(
+		self, caplog: pytest.LogCaptureFixture
+	) -> None:
+		# "fixture type 4" on its own does not say which transformer to go
+		# and look at, which is the whole reason the host is carried down.
+
+		with caplog.at_level(logging.WARNING, logger="wac_iot.models"):
+			CFixture({"addr": 1, "type": 4}, "192.0.2.10")
+
+		assert "192.0.2.10" in caplog.records[0].getMessage()
+
+	def test_each_device_warns_about_the_same_unknown_type(
+		self, caplog: pytest.LogCaptureFixture
+	) -> None:
+		# Deduping on the type alone would name the first device and then go
+		# quiet about every other one carrying it.
+
+		with caplog.at_level(logging.WARNING, logger="wac_iot.models"):
+			for strHost in ("192.0.2.10", "192.0.2.10", "192.0.2.11", "192.0.2.10"):
+				CFixture({"addr": 1, "type": 4}, strHost)
+
+		assert len(caplog.records) == 2
 
 	def test_missing_type_is_unknown(self) -> None:
 		assert CFixture({"addr": 1}).fixturek is FIXTUREK.Unknown

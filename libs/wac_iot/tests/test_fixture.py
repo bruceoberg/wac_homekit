@@ -11,6 +11,7 @@ takes and what is in each.
 from __future__ import annotations  # Forward refs without quotes
 
 import asyncio
+import logging
 
 from collections.abc import Coroutine
 from typing import Any
@@ -18,6 +19,7 @@ from typing import Any
 import pytest
 
 from wac_iot import CFixtures, WacTransportError
+from wac_iot import models
 
 
 class TestObjTryStateFromControl:
@@ -192,3 +194,37 @@ class TestControlOffLast:
 			ObjRun(self.FixsBuild(trans).ControlLight(self.ADDR, fOn=False, nLevel=5000))
 
 		assert trans.lObjState == [{"level": 5000}]
+
+
+class TestReadNamesTheDevice:
+	"""An unknown type has to arrive with the host it was read from.
+
+	The plumbing is what this pins, not the message: `LFixtureFromRead`
+	defaults its host to None, so a caller that stops passing one loses the
+	address silently rather than failing.
+	"""
+
+	class CTransRead:  # tag = trans
+		"""Answers one action 3 read, and knows where it is dialling."""
+
+		def __init__(self, strHost: str) -> None:
+			self.strHost = strHost
+
+		async def ObjAction(self, strUri: str, nAction: int, **kwargs: Any) -> dict[str, Any]:
+			return {"result": "0", "fixture": [{"addr": 1, "type": 4}]}
+
+	def test_an_unknown_type_read_from_a_device_names_it(
+		self, caplog: pytest.LogCaptureFixture
+	) -> None:
+		# Type 4 is the ColorScaping pseudo-fixture, which is exactly the one
+		# that warns on a live bridge.
+
+		models.g_setUnknownSeen.clear()
+
+		fixs = CFixtures(self.CTransRead("192.0.2.10"))  # type: ignore[arg-type]
+
+		with caplog.at_level(logging.WARNING, logger="wac_iot.models"):
+			lFixture = asyncio.run(fixs.LFixtureRead(1))
+
+		assert len(lFixture) == 1
+		assert "192.0.2.10" in caplog.records[0].getMessage()

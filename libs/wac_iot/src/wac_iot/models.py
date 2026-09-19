@@ -24,17 +24,22 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 g_log = logging.getLogger(__name__)
 
-# Unrecognized type IDs already reported. A consumer that polls rebuilds every
-# fixture on every tick, so a type that is simply a permanent part of the
-# system — the type-4 pseudo-fixture ColorScaping hardware reports — would
-# otherwise warn every few seconds for the life of the process. Measured on a
-# bridge at a 5s interval: about 17,000 identical warnings a day about a
-# condition that will never change. Worth saying once, and only once.
+# Unrecognized types already reported, as (host, type ID) pairs. A consumer
+# that polls rebuilds every fixture on every tick, so a type that is simply a
+# permanent part of the system — the type-4 pseudo-fixture ColorScaping
+# hardware reports — would otherwise warn every few seconds for the life of
+# the process. Measured on a bridge at a 5s interval: about 17,000 identical
+# warnings a day about a condition that will never change. Worth saying once,
+# and only once.
+#
+# Keyed by host as well as by ID because the host is in the message: deduping
+# on the ID alone would name whichever device happened to be read first and
+# then stay silent about every other one carrying the same type.
 #
 # Process-lifetime, deliberately: the point is one warning per run, and a
 # consumer that wants to see it again restarts.
 
-g_setNTypeUnknownSeen: set[int] = set()
+g_setUnknownSeen: set[tuple[str | None, int]] = set()
 
 
 class FIXTUREK(IntEnum):  # tag = fixturek — kinds of fixture
@@ -59,13 +64,9 @@ class FIXTUREK(IntEnum):  # tag = fixturek — kinds of fixture
 
 	@classmethod
 	def _missing_(cls, value: object) -> FIXTUREK:
-		# Once per distinct ID, not once per fixture parsed — see
-		# g_setNTypeUnknownSeen. Anything unhashable is not an ID this
-		# library could report usefully anyway, so it just falls through.
-
-		if isinstance(value, int) and value not in g_setNTypeUnknownSeen:
-			g_setNTypeUnknownSeen.add(value)
-			g_log.warning("unrecognized fixture type %r", value)
+		# Silent on purpose. All this knows is a number, and a warning about
+		# an unknown type is only actionable with the device it came from —
+		# which is why `CFixture` does the reporting instead.
 
 		return cls.Unknown
 
@@ -322,9 +323,14 @@ class CFixture:  # tag = fixture
 	resolves to FIXTUREK.Unknown with its structures parsed into the
 	permissive bases; the raw object stays on `obj` either way so callers
 	can see exactly what arrived.
+
+	`strHost` is whatever the fixture was read from — an address for a
+	client built from discovery. It is only what the unknown-type warning
+	names itself after: on a system with several transformers, "fixture type
+	4" alone does not say which one to go and look at.
 	"""
 
-	def __init__(self, obj: dict[str, Any]) -> None:
+	def __init__(self, obj: dict[str, Any], strHost: str | None = None) -> None:
 		self.obj = obj  # raw fixture object, exactly as the device sent it
 
 		objType = obj.get("type")
@@ -336,6 +342,21 @@ class CFixture:  # tag = fixture
 
 		objName = obj.get("name")
 		self.strName = objName if isinstance(objName, str) else None
+
+		# Once per host and ID, not once per fixture parsed — see
+		# g_setUnknownSeen. A type of -1 is a fixture that sent no `type` at
+		# all rather than one this library has not heard of, and there is
+		# nothing to report about a number the device never gave.
+
+		if self.nType != FIXTUREK.Unknown and not self.FIsKnown():
+			tplSeen = (strHost, self.nType)
+
+			if tplSeen not in g_setUnknownSeen:
+				g_setUnknownSeen.add(tplSeen)
+
+				strWhere = f" on {strHost}" if strHost else ""
+
+				g_log.warning("unrecognized fixture%s: %s", strWhere, self.StrDescribe())
 
 		clsState, clsTune, clsDetail = g_mpFixturekShapes.get(self.fixturek, g_shapesUnknown)
 
