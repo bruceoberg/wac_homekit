@@ -519,6 +519,32 @@ yet, by someone who has not read any of this.
   that nothing here can notice the deletion — because the previous wording
   sent someone hunting for a state file, and the one before that implied the
   bridge would work it out by itself.
+
+  **Only at a terminal, though.** Under a unit that block is noise, and the
+  one line of it that is advice is unreachable: `--unpair` lives in
+  `ExecStart`, in a nix file in another repo, and the fact the block carries
+  is already in the `Status:` line. So a paired service run prints two lines
+  instead — the fact, and an unpair in terms of the persist directory this
+  process resolved: stop the service, remove the *contents* of that
+  directory, start it again.
+
+  "contents of" is load-bearing rather than pedantic. Under `DynamicUser`
+  the state directory is a symlink into `/var/lib/private`, and an `rm -rf`
+  of the path without a trailing slash takes the link and leaves the state —
+  an unpair that reports success and did nothing. The unit is deliberately
+  *not* named: the process is given `INVOCATION_ID` and not the unit name,
+  and recovering it from `/proc/self/cgroup` buys nothing a path-based
+  instruction does not already have. The README names it, where naming it is
+  safe, and prefers `systemctl clean --what=state` for the same indirection.
+
+  Which case this is comes from `PerstResolve`, which already had to decide
+  it in order to choose between `/var/lib/wac-homekit` and the XDG
+  directory. It returns that answer alongside the path as `SPersist`, rather
+  than anything downstream testing `NOTIFY_SOCKET` — two definitions of
+  service-ness could disagree, and the one that decided where the state
+  actually went is the one that matters. The unpaired branch is untouched in
+  both cases: the setup code and the QR are how someone pairs without a
+  terminal, so a service run is where they matter most.
 - **Deleted while the bridge is *running* is fully automatic**, and that is
   the case a bridge running as a service actually hits. iOS sends
   `RemovePairing`, HAP-python clears the client and re-advertises, and
@@ -677,10 +703,14 @@ pure functions whose arithmetic is easy to get subtly wrong:
   machine. The `networksetup` stanza parser is the one with a real trap: the
   device name arrives on a line *after* the port name identifying it, so a
   naive parse returns whichever device it happened to see first.
-- persist-directory resolution, with the service directory injected so the
+- persist-directory resolution, including the service-versus-terminal flag
+  it hands on, with the service directory injected so the
   suite never depends on whether this particular machine happens to have
   `/var/lib/wac-homekit` — which is exactly the ambiguity the resolution
   exists to remove.
+- the paired startup message: the short form under a service, the long
+  block unchanged at a terminal, and the setup code and QR in both cases
+  when unpaired.
 - the X-HM setup payload, unpacked field by field rather than compared against
   a fixed string, which would pass just as happily with two fields transposed.
 - the unpair path: that `CUnpairAll` empties the bridge through the driver

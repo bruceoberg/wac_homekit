@@ -23,7 +23,7 @@ import sys
 
 from io import StringIO
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, NamedTuple, TextIO
 
 from pyhap.accessory import Accessory, Bridge
 from pyhap.accessory_driver import AccessoryDriver
@@ -43,7 +43,7 @@ from wac_iot import (
 
 from .accessory import AID_MAX, AID_MIN, CFixtureAccessory, TierTryFromFixturek
 from .netiface import StrAddrResolve
-from .notify import CNotifier, SStatus
+from .notify import CNotifier, SStatus, StrCount
 
 g_log = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ BRIDGE_NAME = "WAC Lighting"
 # bridge. Under systemd it is the StateDirectory the unit declares; for a
 # person trying the bridge out it has to be somewhere writable without root,
 # because a first run that dies on mkdir is a first run that teaches nothing.
-# `PathPersistResolve` picks between them.
+# `PerstResolve` picks between them.
 
 PERSIST_DIR_SERVICE = Path("/var/lib/wac-homekit")
 PERSIST_DIR_NAME = "wac-homekit"
@@ -915,11 +915,24 @@ class CEncoderPretty:  # tag = encp
 		AccessoryEncoder.load_into(fp, state)
 
 
-def PathPersistResolve(
+class SPersist(NamedTuple):  # tag = perst
+	"""Where the pairing state lives, and which of the two homes that is.
+
+	The flag rides along with the path rather than being worked out again
+	downstream. `PerstResolve` is where service-versus-terminal is actually
+	decided, and a second test of it — `NOTIFY_SOCKET`, say — could disagree
+	with the directory the state is really in.
+	"""
+
+	pathDir: Path      # directory holding the pairing state
+	fService: bool     # that directory is the service one, so: running under systemd
+
+
+def PerstResolve(
 	pathGiven: Path | None,
 	*,
 	pathService: Path = PERSIST_DIR_SERVICE,
-) -> Path:
+) -> SPersist:
 	"""Where the pairing state should live, given what the user asked for.
 
 	Three cases, in order:
@@ -943,18 +956,22 @@ def PathPersistResolve(
 	covers both.
 	"""
 
+	# An explicit path that happens to be the service directory still counts
+	# as the service — a unit that spells out what `StateDirectory` already
+	# gave it should not get the terminal's advice.
+
 	if pathGiven is not None:
-		return pathGiven
+		return SPersist(pathGiven, pathGiven == pathService)
 
 	if os.access(pathService, os.W_OK | os.X_OK):
-		return pathService
+		return SPersist(pathService, True)
 
 	# XDG's own rule: an unset *or empty* variable falls back to the default.
 
 	strStateHome = os.environ.get("XDG_STATE_HOME")
 	pathStateHome = Path(strStateHome) if strStateHome else Path.home() / ".local" / "state"
 
-	return pathStateHome / PERSIST_DIR_NAME
+	return SPersist(pathStateHome / PERSIST_DIR_NAME, False)
 
 
 def CMissForget(dTForget: float, dTPoll: float) -> int:
@@ -1107,7 +1124,7 @@ def PrintSetupCode(
 	strXhmUri: str | None,
 	*,
 	cClientPaired: int,
-	pathPersist: Path,
+	perst: SPersist,
 ) -> None:
 	"""Show how to pair with this bridge, or why there is nothing to show.
 
@@ -1124,9 +1141,17 @@ def PrintSetupCode(
 	reliably tell the accessory — measured here, with both paired clients
 	still in the persist file afterwards. From the phone the bridge looks
 	gone and ready to re-pair; from the bridge it is still paired and
-	refusing. The line below is what makes those two views comparable
-	without a packet capture, and the `--unpair` line below is what gets
-	someone out of it without going near the state file.
+	refusing. The lines below are what makes those two views comparable
+	without a packet capture, and the recovery advice is what gets someone
+	out of it without going near the state file.
+
+	**A paired bridge says it differently to a service than to a terminal.**
+	Under a unit the long explanation is noise — and its `--unpair` advice is
+	unreachable, since the flags live in `ExecStart` in another repo — while
+	the fact it carries is already in the `Status:` line. So the service gets
+	two lines: the fact, and an unpair the reader can actually perform on the
+	directory this run resolved. Which case this is comes from `perst`, so it
+	is the same answer that decided where the state went.
 
 	When there is a code worth showing, the digits come first and grouped
 	twice: HAP-python prints them 3-2-3, which is the format the protocol
@@ -1145,6 +1170,27 @@ def PrintSetupCode(
 	"""
 
 	if cClientPaired:
+		if perst.fService:
+			# Under a unit, most of what the terminal gets is noise and one
+			# line of it is a lie: `--unpair` lives in ExecStart, in another
+			# repo, and is not something the reader can reach. The one fact
+			# worth keeping is already in `systemctl status`, so all this owes
+			# them is the recovery — in terms of the directory this process
+			# resolved, since nothing here knows what the unit is called.
+			#
+			# "the contents of" is load-bearing. Under `DynamicUser` that
+			# directory is a symlink into /var/lib/private, and an `rm -rf` of
+			# the path without a trailing slash takes the symlink and leaves
+			# the state — an unpair that reports success and did nothing.
+
+			print(f"paired with {StrCount(cClientPaired, 'controller')} — no setup code applies")
+			print(
+				f"to unpair: stop the service, remove the contents of {perst.pathDir},"
+				" then start it again"
+			)
+
+			return
+
 		# The recovery path names the file outright rather than pointing at
 		# the log line above it. Someone reading this is looking at a bridge
 		# that will not pair and has just been told why; making them go and
@@ -1304,13 +1350,14 @@ class CPairingWatch:  # tag = pwat
 	so the persist and the advertisement update are safe to reach from here.
 	"""
 
-	def __init__(self, bridge: CBridge, *, pathPersist: Path) -> None:
+	def __init__(self, bridge: CBridge, *, perst: SPersist) -> None:
 		self.bridge = bridge
 
-		# Named only to be printed in the recovery advice, but printed at the
-		# one moment someone needs it.
+		# Carried only to hand back to `PrintSetupCode`, which needs it for
+		# the paired branch. This always prints the unpaired one — the bridge
+		# has just come free — so nothing here reads it.
 
-		self.pathPersist = pathPersist
+		self.perst = perst
 
 	def Install(self) -> None:
 		"""Wrap the handler method. Called once, for the life of the process."""
@@ -1342,7 +1389,7 @@ class CPairingWatch:  # tag = pwat
 			self.bridge.driver.state.pincode.decode(),
 			StrTryXhmUri(self.bridge),
 			cClientPaired=0,
-			pathPersist=self.pathPersist,
+			perst=self.perst,
 		)
 
 		# The case the status line earns its keep on. The bridge has just
@@ -1402,14 +1449,19 @@ async def NRun(
 	# and the address we advertise can never drift apart.
 
 	strAddr = StrAddrResolve(strIface)
-	pathPersistDir = PathPersistResolve(pathPersistDir)
+
+	# Resolved once as well, and for the same reason: the flag that rides
+	# with the path is how the paired startup message knows whether anyone
+	# can act on `--unpair`.
+
+	perst = PerstResolve(pathPersistDir)
 
 	g_log.info("bridging on %s", strAddr)
-	g_log.info("pairing state in %s", pathPersistDir)
+	g_log.info("pairing state in %s", perst.pathDir)
 
 	loop = asyncio.get_running_loop()
 	driver = DriverBuild(
-		pathPersistDir=pathPersistDir,
+		pathPersistDir=perst.pathDir,
 		nPort=nPort,
 		strPincode=strPincode,
 		strAddr=strAddr,
@@ -1471,7 +1523,7 @@ async def NRun(
 
 		taskWatch = asyncio.create_task(bridge.WatchAsync(watcher))
 
-		pwat = CPairingWatch(bridge, pathPersist=pathPersistDir / PERSIST_FILE)
+		pwat = CPairingWatch(bridge, perst=perst)
 
 		# Installed before the server accepts anything, so the first request of
 		# the run is already covered.
@@ -1495,7 +1547,7 @@ async def NRun(
 			driver.state.pincode.decode(),
 			StrTryXhmUri(bridge),
 			cClientPaired=len(driver.state.paired_clients),
-			pathPersist=pathPersistDir / PERSIST_FILE,
+			perst=perst,
 		)
 
 		# Straight after the printing, so the first status line carries the

@@ -143,8 +143,13 @@ def main() -> None:
 		help=(
 			"forget every paired controller at startup and serve as an unpaired "
 			"bridge, printing a setup code. for a bridge deleted from the Home "
-			"app while it was not running, which leaves it paired to controllers "
-			"that no longer exist and invisible to the app"
+			"app while it was not running: the removal is sent over a HAP "
+			"connection, so with nothing listening it never arrives, and the "
+			"bridge goes on advertising itself as paired. nothing here can "
+			"notice that — iOS does not contact a bridge that says it is paired, "
+			"so there is no request to see — which is why this is a flag and not "
+			"automatic. the MAC and the keypair are kept, so only the "
+			"controllers that no longer exist are lost"
 		),
 	)
 	parser.add_argument(

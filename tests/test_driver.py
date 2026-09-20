@@ -36,7 +36,9 @@ from wac_homekit.driver import (
 	CMissForget,
 	CPairingWatch,
 	CUnpairAll,
-	PathPersistResolve,
+	PerstResolve,
+	PrintSetupCode,
+	SPersist,
 	StrBase36,
 	StrXhmUri,
 )
@@ -46,7 +48,7 @@ from wac_homekit.driver import (
 CATEGORY_BRIDGE = 2
 
 
-class TestPathPersistResolve:
+class TestPerstResolve:
 	"""Where the pairing state lands, which decides whether a blind run works.
 
 	The whole point is that no case needs root. `pathService` is injected so
@@ -62,7 +64,22 @@ class TestPathPersistResolve:
 		pathService = tmp_path / "service"
 		pathService.mkdir()
 
-		assert PathPersistResolve(pathGiven, pathService=pathService) == pathGiven
+		assert PerstResolve(pathGiven, pathService=pathService).pathDir == pathGiven
+
+	def test_explicit_service_dir_still_counts_as_the_service(self, tmp_path: Path) -> None:
+		"""A unit spelling out what StateDirectory already gave it should not
+		get the terminal's advice."""
+
+		pathService = tmp_path / "service"
+		pathService.mkdir()
+
+		assert PerstResolve(pathService, pathService=pathService).fService
+
+	def test_explicit_elsewhere_is_not_the_service(self, tmp_path: Path) -> None:
+		pathService = tmp_path / "service"
+		pathService.mkdir()
+
+		assert not PerstResolve(tmp_path / "elsewhere", pathService=pathService).fService
 
 	def test_explicit_is_not_checked_for_usability(self, tmp_path: Path) -> None:
 		"""A bridge quietly pairing somewhere other than where it was told is
@@ -70,7 +87,7 @@ class TestPathPersistResolve:
 
 		pathGiven = tmp_path / "does" / "not" / "exist"
 
-		assert PathPersistResolve(pathGiven) == pathGiven
+		assert PerstResolve(pathGiven).pathDir == pathGiven
 
 	def test_service_dir_used_when_writable(self, tmp_path: Path) -> None:
 		"""systemd's StateDirectory exists before the unit runs, which is the
@@ -79,7 +96,10 @@ class TestPathPersistResolve:
 		pathService = tmp_path / "service"
 		pathService.mkdir()
 
-		assert PathPersistResolve(None, pathService=pathService) == pathService
+		perst = PerstResolve(None, pathService=pathService)
+
+		assert perst.pathDir == pathService
+		assert perst.fService
 
 	def test_missing_service_dir_falls_back(
 		self,
@@ -89,9 +109,10 @@ class TestPathPersistResolve:
 		pathState = tmp_path / "state"
 		monkeypatch.setenv("XDG_STATE_HOME", str(pathState))
 
-		pathResolved = PathPersistResolve(None, pathService=tmp_path / "absent")
+		perst = PerstResolve(None, pathService=tmp_path / "absent")
 
-		assert pathResolved == pathState / PERSIST_DIR_NAME
+		assert perst.pathDir == pathState / PERSIST_DIR_NAME
+		assert not perst.fService
 
 	def test_unwritable_service_dir_falls_back(
 		self,
@@ -105,9 +126,10 @@ class TestPathPersistResolve:
 		pathService.mkdir(mode=0o500)
 		monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
 
-		pathResolved = PathPersistResolve(None, pathService=pathService)
+		perst = PerstResolve(None, pathService=pathService)
 
-		assert pathResolved == tmp_path / "state" / PERSIST_DIR_NAME
+		assert perst.pathDir == tmp_path / "state" / PERSIST_DIR_NAME
+		assert not perst.fService
 
 	def test_unset_xdg_state_home_uses_the_documented_default(
 		self,
@@ -117,7 +139,7 @@ class TestPathPersistResolve:
 		monkeypatch.delenv("XDG_STATE_HOME", raising=False)
 		monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
 
-		pathResolved = PathPersistResolve(None, pathService=tmp_path / "absent")
+		pathResolved = PerstResolve(None, pathService=tmp_path / "absent").pathDir
 
 		assert pathResolved == tmp_path / ".local" / "state" / PERSIST_DIR_NAME
 
@@ -132,7 +154,7 @@ class TestPathPersistResolve:
 		monkeypatch.setenv("XDG_STATE_HOME", "")
 		monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
 
-		pathResolved = PathPersistResolve(None, pathService=tmp_path / "absent")
+		pathResolved = PerstResolve(None, pathService=tmp_path / "absent").pathDir
 
 		assert pathResolved == tmp_path / ".local" / "state" / PERSIST_DIR_NAME
 
@@ -308,6 +330,100 @@ class TestCUnpairAll:
 		assert not driver.cUnpair
 
 
+class TestPrintSetupCode:
+	"""What a startup tells the person who has to pair with it.
+
+	The paired branch says different things to a service and to a terminal,
+	and getting that backwards is what makes the block either noise in a
+	journal or an unactionable instruction. The unpaired branch is the same
+	in both — the code and the QR are how someone pairs without a terminal.
+	"""
+
+	PINCODE = "111-22-333"
+	XHM = "X-HM://0023LP1FOXYZ"
+
+	def StrOut(
+		self,
+		capsys: pytest.CaptureFixture[str],
+		*,
+		cClientPaired: int,
+		fService: bool,
+		pathDir: Path,
+	) -> str:
+		PrintSetupCode(
+			self.PINCODE,
+			self.XHM,
+			cClientPaired=cClientPaired,
+			perst=SPersist(pathDir, fService),
+		)
+
+		return capsys.readouterr().out
+
+	def test_paired_service_says_the_fact_and_the_recovery(
+		self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+	) -> None:
+		"""Two lines: what it is, and an unpair the reader can actually
+		perform — the flags live in ExecStart, in another repo."""
+
+		strOut = self.StrOut(capsys, cClientPaired=2, fService=True, pathDir=tmp_path)
+
+		assert "paired with 2 controllers" in strOut
+		assert "no setup code applies" in strOut
+		assert str(tmp_path) in strOut
+		assert "--unpair" not in strOut
+		assert self.PINCODE not in strOut
+
+	def test_paired_service_says_contents_of(
+		self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+	) -> None:
+		"""Under DynamicUser the directory is a symlink into /var/lib/private,
+		and `rm -rf` of the path itself takes the link and leaves the state —
+		an unpair that looks like it worked."""
+
+		strOut = self.StrOut(capsys, cClientPaired=1, fService=True, pathDir=tmp_path)
+
+		assert f"contents of {tmp_path}" in strOut
+
+	def test_paired_service_counts_one_controller_singular(
+		self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+	) -> None:
+		strOut = self.StrOut(capsys, cClientPaired=1, fService=True, pathDir=tmp_path)
+
+		assert "paired with 1 controller " in strOut
+
+	def test_paired_terminal_keeps_the_long_block(
+		self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+	) -> None:
+		"""Where --unpair is something the reader can type, the explanation of
+		why nothing here notices a deletion is worth its four lines."""
+
+		strOut = self.StrOut(capsys, cClientPaired=2, fService=False, pathDir=tmp_path)
+
+		assert "paired with 2 controller(s) — no setup code applies" in strOut
+		assert "--unpair" in strOut
+		assert "iOS does not contact a bridge that says it is paired" in strOut
+		assert "stop the service" not in strOut
+
+	def test_unpaired_prints_the_code_in_both_cases(
+		self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+	) -> None:
+		"""The QR and the digits are how someone pairs without a terminal, so
+		a service run is exactly where they matter most."""
+
+		for fService in (False, True):
+			strOut = self.StrOut(
+				capsys, cClientPaired=0, fService=fService, pathDir=tmp_path
+			)
+
+			assert "1112 2333" in strOut
+			assert self.PINCODE in strOut
+
+			# The QR renders as block characters; either it drew or the URI
+			# fell back to text, and both count as the payload being on screen.
+
+			assert "\u2588" in strOut or self.XHM in strOut
+
+
 class TestCPairingWatch:
 	"""What a *running* bridge does when its last controller removes it.
 
@@ -319,8 +435,9 @@ class TestCPairingWatch:
 	def PwatBuild(self, state: State, tmp_path: Path) -> tuple[CPairingWatch, CDriverStub]:
 		driver = CDriverStub(state)
 		bridge = CBridgeStub(driver)
+		perst = SPersist(tmp_path, False)
 
-		return CPairingWatch(bridge, pathPersist=tmp_path / "state.json"), driver  # type: ignore[arg-type]
+		return CPairingWatch(bridge, perst=perst), driver  # type: ignore[arg-type]
 
 	def test_a_removal_that_empties_the_bridge_announces_it(
 		self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
